@@ -1129,7 +1129,7 @@ def create_downsampling_matrix(H, W, sf, device):
     M = H_ds * W_ds  # Total number of pixels in the downsampled image
 
     # Initialize downsampling matrix of size (M, N)
-    downsample_matrix = torch.zeros((M, N), device=device)
+    downsample_matrix = torch.zeros((M, N), device="cpu")
 
     # Fill the matrix with 1s at positions corresponding to downsampling
     for i in range(H_ds):
