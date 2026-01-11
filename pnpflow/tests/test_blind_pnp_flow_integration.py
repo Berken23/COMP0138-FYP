@@ -101,7 +101,7 @@ def test_operator_gradients():
     
     print("✓ Operator receives gradients")
     print(f"  log_sigma grad: {blur.log_sigma.grad.item():.6f}")
-    print("✅ GRADIENT TEST PASSED")
+    print("GRADIENT TEST PASSED")
     
     return True
 
@@ -143,7 +143,7 @@ def test_operator_learning_only(device='cpu'):
     
     print(f"Initial sigma: {init_sigma:.3f}")
     print(f"Target sigma: {true_sigma:.3f}")
-    print("\nOptimizing...")
+    print("\nOptimising...")
     
     # Optimize for 100 steps
     for step in range(100):
@@ -171,9 +171,9 @@ def test_operator_learning_only(device='cpu'):
     success = error < 0.5
     
     if success:
-        print(f"\n✅ OPERATOR LEARNING TEST PASSED!")
+        print(f"\nOPERATOR LEARNING TEST PASSED!")
     else:
-        print(f"\n⚠️  Operator learning works but could be more accurate")
+        print(f"\nOperator learning works but could be more accurate")
         print(f"   (This is OK for a quick test)")
     
     return True
@@ -204,7 +204,7 @@ def test_blind_deblurring_with_model():
         print("✓ Model loaded successfully!")
         
     except Exception as e:
-        print(f"⚠️  Could not load model: {e}")
+        print(f"  Could not load model: {e}")
         print("   Skipping full reconstruction test")
         print("   Running operator-only test instead...")
         return test_operator_learning_only(device)
@@ -325,9 +325,9 @@ def test_blind_deblurring_with_model():
     success = error < 1.0
     
     if success:
-        print(f"\n✅ TEST PASSED!")
+        print(f"\nTEST PASSED!")
     else:
-        print(f"\n⚠️  Test completed but accuracy could be better")
+        print(f"\n Test completed but accuracy could be better")
         print(f"   (This is OK for a quick 50-iteration test)")
     
     return True
@@ -369,7 +369,7 @@ def main():
     total = len(results)
     
     for test_name, result in results:
-        status = "✅ PASSED" if result else "✗ FAILED"
+        status = "PASSED" if result else "✗ FAILED"
         print(f"{status}: {test_name}")
     
     print(f"\nTotal: {passed}/{total} tests passed")

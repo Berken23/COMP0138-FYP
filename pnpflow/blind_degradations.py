@@ -16,7 +16,6 @@ def get_default_device():
     """Get default device (cuda if available, else cpu)"""
     return 'cuda' if torch.cuda.is_available() else 'cpu'
 
-
 class LearnableGaussianBlur(nn.Module):
     """
     Learnable Gaussian blur kernel.
@@ -307,7 +306,6 @@ class LearnableMask(nn.Module):
             mask = self.get_mask(hard=True)
             return mask.mean().item()
 
-# Replace the LearnableDownsampling class with this fixed version:
 
 class LearnableDownsampling(nn.Module):
     """

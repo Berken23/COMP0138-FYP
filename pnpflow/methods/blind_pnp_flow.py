@@ -302,23 +302,23 @@ class BlindPnPFlow:
                         if iteration % 50 == 0 or self.should_save_image(iteration, steps):
                             restored_img = x.detach().clone()
                             utils.compute_psnr(clean_img, noisy_img, restored_img, 
-                                            self.args, self.H_adj, iter=iteration)  # FIXED
+                                            self.args, self.H_adj, iter=iteration)
                             utils.compute_ssim(clean_img, noisy_img, restored_img, 
-                                            self.args, self.H_adj, iter=iteration)  # FIXED
+                                            self.args, self.H_adj, iter=iteration)
                             utils.compute_lpips(clean_img, noisy_img, restored_img, 
-                                            self.args, self.H_adj, iter=iteration)  # FIXED
+                                            self.args, self.H_adj, iter=iteration)
             
             # Save final results
             if self.args.save_results:
                 restored_img = x.detach().clone()
                 utils.save_images(clean_img, noisy_img, restored_img,
-                                self.args, self.H_adj, iter='final')  # FIXED
+                                self.args, self.H_adj, iter='final')
                 utils.compute_psnr(clean_img, noisy_img, restored_img,
-                                self.args, self.H_adj, iter=iteration)  # FIXED
+                                self.args, self.H_adj, iter=iteration)
                 utils.compute_ssim(clean_img, noisy_img, restored_img,
-                                self.args, self.H_adj, iter=iteration)  # FIXED
+                                self.args, self.H_adj, iter=iteration)
                 utils.compute_lpips(clean_img, noisy_img, restored_img,
-                                self.args, self.H_adj, iter=iteration)  # FIXED
+                                self.args, self.H_adj, iter=iteration)
                 
                 # Save operator history
                 self.save_operator_history(batch)

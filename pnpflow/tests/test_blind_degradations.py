@@ -307,7 +307,7 @@ def test_device_compatibility():
         assert y_cuda.shape == x_cuda.shape, "Shape should be preserved"
         print("✓ CUDA test passed")
     else:
-        print("⚠ CUDA not available, skipping CUDA test")
+        print("↓ CUDA not available, skipping CUDA test")
     
     print("✓ Device compatibility test PASSED\n")
 
@@ -542,12 +542,12 @@ if __name__ == '__main__':
             failed += 1
             error_msg = f"FAILED: {test_name}\n  Error: {str(e)}"
             errors.append(error_msg)
-            print(f"\n❌ {error_msg}\n")
+            print(f"\n↓ {error_msg}\n")
         except Exception as e:
             failed += 1
             error_msg = f"ERROR: {test_name}\n  Exception: {str(e)}"
             errors.append(error_msg)
-            print(f"\n❌ {error_msg}\n")
+            print(f"\n↓ {error_msg}\n")
             import traceback
             traceback.print_exc()
     
@@ -564,10 +564,10 @@ if __name__ == '__main__':
         print("\nFailed tests:")
         for error in errors:
             print(f"  • {error}")
-        print("\n❌ SOME TESTS FAILED")
+        print("\nSOME TESTS FAILED")
         sys.exit(1)
     else:
-        print("\n✅ ALL TESTS PASSED!")
+        print("\nALL TESTS PASSED!")
         print("\nNext steps:")
         print("  1. Review the test outputs above")
         print("  2. Proceed to implement blind_pnp_flow.py")
