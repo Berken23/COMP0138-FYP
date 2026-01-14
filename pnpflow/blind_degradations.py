@@ -1,555 +1,379 @@
 """
 Learnable forward operators for blind inverse problems.
-Each operator is a nn.Module with learnable parameters that can be optimized
-during the blind reconstruction process.
 
-Compatible with PnP-Flow framework using OT Flow Matching models.
+Fixes vs your original:
+- No "self.device" strings inside modules; tensors are created on the correct runtime device.
+- CompositeOperator does NOT add noise by default (noise belongs in the likelihood, not H).
+- LearnableMask semantics are consistent: mask=1 means "observed/kept", and masked_ratio = 1 - keep_ratio.
+- Safer numerics (eps in normalizations, sigma lower bound).
 """
 
+from __future__ import annotations
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 
-def get_default_device():
-    """Get default device (cuda if available, else cpu)"""
-    return 'cuda' if torch.cuda.is_available() else 'cpu'
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+
+def _ensure_odd(k: int) -> int:
+    return k if (k % 2 == 1) else (k + 1)
+
+
+def _device_of(*tensors_or_params) -> torch.device:
+    for obj in tensors_or_params:
+        if isinstance(obj, torch.Tensor):
+            return obj.device
+        if isinstance(obj, nn.Parameter):
+            return obj.device
+    return torch.device("cpu")
+
+
+# -----------------------------------------------------------------------------
+# Learnable Gaussian Blur
+# -----------------------------------------------------------------------------
 
 class LearnableGaussianBlur(nn.Module):
     """
-    Learnable Gaussian blur kernel.
-    Parameterizes a Gaussian kernel with learnable sigma parameter.
-    
-    The blur kernel is applied via circular convolution to avoid boundary artifacts.
-    Sigma is parameterized in log space to ensure positivity.
-    
-    Args:
-        kernel_size (int): Size of the blur kernel (should be odd)
-        num_channels (int): Number of image channels (3 for RGB)
-        init_sigma (float): Initial value of sigma
-        device (str): Device to place parameters on ('cuda' or 'cpu')
+    Learnable Gaussian blur via depthwise convolution with circular padding.
+    Sigma is parameterized in log space for positivity.
     """
-    
-    def __init__(self, kernel_size=61, num_channels=3, init_sigma=1.0, device=None):
+
+    def __init__(self, kernel_size: int = 61, num_channels: int = 3, init_sigma: float = 1.0):
         super().__init__()
-        
-        # Ensure kernel size is odd
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-            
-        self.kernel_size = kernel_size
-        self.num_channels = num_channels
-        self.device = device if device is not None else get_default_device()
-        
-        # Use log parameterization to ensure sigma > 0
-        # During optimization, sigma = exp(log_sigma) is always positive
+        self.kernel_size = _ensure_odd(int(kernel_size))
+        self.num_channels = int(num_channels)
+
+        init_sigma = float(init_sigma)
+        if init_sigma <= 0:
+            raise ValueError("init_sigma must be > 0")
+
         self.log_sigma = nn.Parameter(torch.log(torch.tensor(init_sigma, dtype=torch.float32)))
-        
-    def forward(self, x):
-        """
-        Apply learned Gaussian blur to input image.
-        
-        Args:
-            x: Input image [B, C, H, W]
-        
-        Returns:
-            Blurred image [B, C, H, W]
-        """
-        sigma = torch.exp(self.log_sigma)
-        kernel = self._create_gaussian_kernel(sigma)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        sigma = torch.exp(self.log_sigma).clamp(min=1e-4)
+        kernel = self._create_gaussian_kernel(sigma, device=x.device, dtype=x.dtype)
         return self._apply_blur(x, kernel)
-    
-    def _create_gaussian_kernel(self, sigma):
-        """
-        Create 2D Gaussian kernel from sigma parameter.
-        
-        Args:
-            sigma: Standard deviation of Gaussian
-            
-        Returns:
-            kernel: [num_channels, 1, kernel_size, kernel_size]
-        """
-        kernel_size = self.kernel_size
-        
-        # Create coordinate grid centered at 0
-        ax = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1., 
-                         device=self.device, dtype=torch.float32)
-        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
-        
-        # Gaussian formula: exp(-(x^2 + y^2) / (2 * sigma^2))
-        kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
-        
-        # Normalize so sum = 1
-        kernel = kernel / kernel.sum()
-        
-        # Reshape for depthwise convolution: [out_channels, in_channels, H, W]
-        # For depthwise conv, out_channels = num_channels, in_channels = 1
-        kernel = kernel.view(1, 1, kernel_size, kernel_size)
-        kernel = kernel.repeat(self.num_channels, 1, 1, 1)
-        
+
+    def _create_gaussian_kernel(self, sigma: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        k = self.kernel_size
+        # Coordinate grid centered at 0 on the correct runtime device
+        ax = torch.arange(-(k // 2), (k // 2) + 1, device=device, dtype=dtype)
+        yy, xx = torch.meshgrid(ax, ax, indexing="ij")
+        kernel = torch.exp(-(xx**2 + yy**2) / (2.0 * sigma.to(dtype=dtype) ** 2))
+        kernel = kernel / (kernel.sum() + 1e-12)
+        kernel = kernel.view(1, 1, k, k).repeat(self.num_channels, 1, 1, 1)  # [C,1,K,K]
         return kernel
-    
-    def _apply_blur(self, x, kernel):
-        """
-        Apply blur kernel via convolution with circular padding.
-        
-        Args:
-            x: Input image [B, C, H, W]
-            kernel: Blur kernel [C, 1, K, K]
-            
-        Returns:
-            Blurred image [B, C, H, W]
-        """
+
+    def _apply_blur(self, x: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         pad = self.kernel_size // 2
-        
-        # Use circular padding to avoid boundary artifacts
-        x_padded = F.pad(x, (pad, pad, pad, pad), mode='circular')
-        
-        # Apply depthwise convolution (same kernel for each channel)
-        blurred = F.conv2d(x_padded, kernel, groups=self.num_channels)
-        
-        return blurred
-    
-    def get_sigma(self):
-        """Return current sigma value as Python float"""
-        return torch.exp(self.log_sigma).item()
-    
-    def get_kernel(self):
-        """Return current kernel as numpy array for visualization"""
+        x_padded = F.pad(x, (pad, pad, pad, pad), mode="circular")
+        return F.conv2d(x_padded, kernel, groups=self.num_channels)
+
+    def get_sigma(self) -> float:
+        return float(torch.exp(self.log_sigma).item())
+
+    def get_kernel(self) -> np.ndarray:
         with torch.no_grad():
-            sigma = torch.exp(self.log_sigma)
-            kernel = self._create_gaussian_kernel(sigma)
-            return kernel[0, 0].cpu().numpy()
+            # Create kernel on same device as parameter, then move to CPU numpy
+            sigma = torch.exp(self.log_sigma).clamp(min=1e-4)
+            device = sigma.device
+            kernel = self._create_gaussian_kernel(sigma, device=device, dtype=torch.float32)
+            return kernel[0, 0].detach().cpu().numpy()
+
+
+# -----------------------------------------------------------------------------
+# Learnable Motion Blur
+# -----------------------------------------------------------------------------
 
 class LearnableMotionBlur(nn.Module):
     """
-    Learnable motion blur kernel.
-    Parameterizes motion blur by length and angle of motion.
-    
-    Uses a differentiable approximation of motion blur by creating
-    a soft line with Gaussian profile.
-    
-    Args:
-        kernel_size (int): Size of the blur kernel (should be odd)
-        num_channels (int): Number of image channels
-        init_length (float): Initial motion length in pixels
-        init_angle (float): Initial motion angle in radians
-        device (str): Device to place parameters on
+    Differentiable motion blur kernel parameterized by length and angle.
+    Implemented as a soft line with smooth edges.
     """
-    
-    def __init__(self, kernel_size=61, num_channels=3, 
-                 init_length=10.0, init_angle=0.0, device=None):
+
+    def __init__(
+        self,
+        kernel_size: int = 61,
+        num_channels: int = 3,
+        init_length: float = 10.0,
+        init_angle: float = 0.0,
+        line_width: float = 1.0,
+        steepness: float = 2.0,
+    ):
         super().__init__()
-        
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-            
-        self.kernel_size = kernel_size
-        self.num_channels = num_channels
-        self.device = device if device is not None else get_default_device()
-        
-        # Learnable parameters
-        # Length in log space for positivity
+        self.kernel_size = _ensure_odd(int(kernel_size))
+        self.num_channels = int(num_channels)
+
+        init_length = float(init_length)
+        if init_length <= 0:
+            raise ValueError("init_length must be > 0")
+
         self.log_length = nn.Parameter(torch.log(torch.tensor(init_length, dtype=torch.float32)))
-        # Angle can be any value (periodic)
-        self.angle = nn.Parameter(torch.tensor(init_angle, dtype=torch.float32))
-        
-        # Pre-compute coordinate grid (constant, doesn't need gradients)
-        ax = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1., 
-                         device=self.device, dtype=torch.float32)
-        yy, xx = torch.meshgrid(ax, ax, indexing='ij')
-        # Register as buffer (moved with model but not trained)
-        self.register_buffer('xx', xx)
-        self.register_buffer('yy', yy)
-        
-    def forward(self, x):
-        """Apply learned motion blur"""
-        length = torch.exp(self.log_length)
-        kernel = self._create_motion_kernel(length, self.angle)
+        self.angle = nn.Parameter(torch.tensor(float(init_angle), dtype=torch.float32))
+
+        self.line_width = float(line_width)
+        self.steepness = float(steepness)
+
+        # Register coordinate grid as buffers so they move with .to(device)
+        k = self.kernel_size
+        ax = torch.arange(-(k // 2), (k // 2) + 1, dtype=torch.float32)
+        yy, xx = torch.meshgrid(ax, ax, indexing="ij")
+        self.register_buffer("xx", xx)  # [K,K]
+        self.register_buffer("yy", yy)  # [K,K]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        length = torch.exp(self.log_length).clamp(min=1e-4)
+        kernel = self._create_motion_kernel(length, self.angle, dtype=x.dtype, device=x.device)
         return self._apply_blur(x, kernel)
-    
-    def _create_motion_kernel(self, length, angle):
-        """
-        Create motion blur kernel from length and angle.
-        Uses fully differentiable operations to preserve gradients.
-        
-        Args:
-            length: Length of motion in pixels (differentiable)
-            angle: Direction of motion in radians (differentiable)
-            
-        Returns:
-            kernel: [num_channels, 1, kernel_size, kernel_size]
-        """
-        # Compute direction vector (differentiable)
-        cos_angle = torch.cos(angle)
-        sin_angle = torch.sin(angle)
-        
-        # Distance from each point to the motion line
-        # Line goes through origin in direction (cos_angle, sin_angle)
-        # Distance to line: |x*sin - y*cos|
-        dist_to_line = torch.abs(self.xx * sin_angle - self.yy * cos_angle)
-        
-        # Distance along the line (projection onto motion direction)
-        dist_along_line = self.xx * cos_angle + self.yy * sin_angle
-        
-        # Create soft line perpendicular to motion
-        line_width = 1.0  # Width of the motion line
-        perp_profile = torch.exp(-dist_to_line**2 / (2 * line_width**2))
-        
-        # Create soft rectangular profile along motion direction
-        # Use sigmoid to create smooth edges
-        half_length = length / 2.0
-        # Smooth step function using sigmoid
-        steepness = 2.0  # Controls sharpness of edges
-        along_profile = torch.sigmoid(steepness * (half_length - torch.abs(dist_along_line)))
-        
-        # Combine profiles
-        kernel = perp_profile * along_profile
-        
-        # Normalize to sum to 1
-        kernel = kernel / (kernel.sum() + 1e-8)
-        
-        # Reshape for convolution [num_channels, 1, H, W]
-        kernel = kernel.view(1, 1, self.kernel_size, self.kernel_size)
-        kernel = kernel.repeat(self.num_channels, 1, 1, 1)
-        
+
+    def _create_motion_kernel(
+        self,
+        length: torch.Tensor,
+        angle: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        # Ensure buffers are on the same device as x (they usually are, but be safe)
+        xx = self.xx.to(device=device, dtype=dtype)
+        yy = self.yy.to(device=device, dtype=dtype)
+
+        cos_a = torch.cos(angle.to(device=device, dtype=dtype))
+        sin_a = torch.sin(angle.to(device=device, dtype=dtype))
+
+        # Distance to line through origin with direction (cos_a, sin_a)
+        dist_to_line = torch.abs(xx * sin_a - yy * cos_a)
+        dist_along = xx * cos_a + yy * sin_a
+
+        # Soft perpendicular profile
+        lw = torch.tensor(self.line_width, device=device, dtype=dtype)
+        perp = torch.exp(-(dist_to_line**2) / (2.0 * lw**2 + 1e-12))
+
+        # Soft segment along the motion direction
+        half_len = (length.to(device=device, dtype=dtype) / 2.0)
+        s = torch.tensor(self.steepness, device=device, dtype=dtype)
+        along = torch.sigmoid(s * (half_len - torch.abs(dist_along)))
+
+        kernel = perp * along
+        kernel = kernel / (kernel.sum() + 1e-12)
+
+        k = self.kernel_size
+        kernel = kernel.view(1, 1, k, k).repeat(self.num_channels, 1, 1, 1)
         return kernel
-    
-    def _apply_blur(self, x, kernel):
-        """Apply blur via convolution"""
+
+    def _apply_blur(self, x: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
         pad = self.kernel_size // 2
-        x_padded = F.pad(x, (pad, pad, pad, pad), mode='circular')
-        blurred = F.conv2d(x_padded, kernel, groups=self.num_channels)
-        return blurred
-    
-    def get_params(self):
-        """Return current parameters as dictionary"""
-        return {
-            'length': torch.exp(self.log_length).item(),
-            'angle': self.angle.item()
-        }
-    
-    def get_kernel(self):
-        """Return current kernel as numpy array"""
+        x_padded = F.pad(x, (pad, pad, pad, pad), mode="circular")
+        return F.conv2d(x_padded, kernel, groups=self.num_channels)
+
+    def get_params(self) -> dict:
+        return {"length": float(torch.exp(self.log_length).item()), "angle": float(self.angle.item())}
+
+    def get_kernel(self) -> np.ndarray:
         with torch.no_grad():
-            length = torch.exp(self.log_length)
-            kernel = self._create_motion_kernel(length, self.angle)
-            return kernel[0, 0].cpu().numpy()
+            length = torch.exp(self.log_length).clamp(min=1e-4)
+            kernel = self._create_motion_kernel(length, self.angle, dtype=torch.float32, device=length.device)
+            return kernel[0, 0].detach().cpu().numpy()
+
+
+# -----------------------------------------------------------------------------
+# Learnable Mask (inpainting)
+# -----------------------------------------------------------------------------
 
 class LearnableMask(nn.Module):
     """
-    Learnable binary mask for inpainting.
-    Uses sigmoid + soft thresholding for differentiable binary mask.
-    
-    Args:
-        image_shape (tuple): Shape of image (C, H, W)
-        init_ratio (float): Initial ratio of masked pixels (0 to 1)
-        temperature (float): Temperature for sigmoid (lower = more binary)
-        device (str): Device to place parameters on
+    Learnable mask for inpainting.
+
+    Convention (IMPORTANT):
+    - mask = 1 means pixel is OBSERVED/KEPT
+    - mask = 0 means pixel is MISSING
+    init_keep_ratio controls the initial fraction of kept pixels.
     """
-    
-    def __init__(self, image_shape, init_ratio=0.5, temperature=1.0, device=None):
+
+    def __init__(self, image_shape, init_keep_ratio: float = 0.5, temperature: float = 1.0):
         super().__init__()
-        
-        self.image_shape = image_shape  # (C, H, W)
-        self.temperature = temperature
-        self.device = device if device is not None else get_default_device()
-        
-        # Initialize mask logits
-        # Logits are converted to probabilities via sigmoid
-        init_logits = torch.randn(*image_shape, dtype=torch.float32) * 0.1
-        
-        if init_ratio is not None:
-            # Initialize to approximately init_ratio of pixels masked
-            # logit = log(p / (1-p)) where p = init_ratio
-            init_value = np.log(init_ratio / (1 - init_ratio + 1e-8))
-            init_logits = init_logits + init_value
-        
+        self.image_shape = tuple(image_shape)  # (C,H,W)
+        self.temperature = float(temperature)
+
+        if not (0.0 < init_keep_ratio < 1.0):
+            raise ValueError("init_keep_ratio must be in (0,1)")
+
+        init_logits = torch.randn(*self.image_shape, dtype=torch.float32) * 0.1
+        init_value = np.log(init_keep_ratio / (1.0 - init_keep_ratio + 1e-8))
+        init_logits = init_logits + float(init_value)
+
         self.mask_logits = nn.Parameter(init_logits)
-        
-    def forward(self, x, hard=False):
-        """
-        Apply mask to input image.
-        
-        Args:
-            x: Input image [B, C, H, W]
-            hard: If True, use hard binary mask (non-differentiable)
-                  If False, use soft mask (differentiable)
-        
-        Returns:
-            Masked image [B, C, H, W]
-        """
+
+    def forward(self, x: torch.Tensor, hard: bool = False) -> torch.Tensor:
         if hard:
-            # Hard binary mask (for inference)
             mask = (torch.sigmoid(self.mask_logits) > 0.5).float()
         else:
-            # Soft mask (for training)
-            mask = torch.sigmoid(self.mask_logits / self.temperature)
-        
-        # Broadcast mask to batch dimension
-        mask = mask.unsqueeze(0)  # [1, C, H, W]
-        
+            mask = torch.sigmoid(self.mask_logits / max(self.temperature, 1e-8))
+
+        mask = mask.to(device=x.device, dtype=x.dtype).unsqueeze(0)  # [1,C,H,W]
         return x * mask
-    
-    def get_mask(self, hard=True):
-        """Get current mask as tensor"""
+
+    def get_mask(self, hard: bool = True) -> torch.Tensor:
         with torch.no_grad():
             if hard:
                 return (torch.sigmoid(self.mask_logits) > 0.5).float()
-            else:
-                return torch.sigmoid(self.mask_logits)
-    
-    def get_masked_ratio(self):
-        """Return fraction of masked pixels"""
-        with torch.no_grad():
-            mask = self.get_mask(hard=True)
-            return mask.mean().item()
+            return torch.sigmoid(self.mask_logits)
 
+    def get_keep_ratio(self) -> float:
+        with torch.no_grad():
+            mask = (torch.sigmoid(self.mask_logits) > 0.5).float()
+            return float(mask.mean().item())
+
+    def get_masked_ratio(self) -> float:
+        # masked ratio = fraction of missing pixels = 1 - keep ratio
+        return float(1.0 - self.get_keep_ratio())
+
+
+# -----------------------------------------------------------------------------
+# Learnable Downsampling (super-resolution)
+# -----------------------------------------------------------------------------
 
 class LearnableDownsampling(nn.Module):
     """
-    Learnable downsampling operator for super-resolution.
-    Learns a downsampling kernel instead of using fixed bicubic/bilinear.
-    
-    FIXED: Proper padding to ensure output size = input size // scale_factor
-    
-    Args:
-        scale_factor (int): Downsampling scale (2 for 2x downsampling)
-        num_channels (int): Number of image channels
-        kernel_size (int): Size of downsampling kernel
-        device (str): Device to place parameters on
+    Learnable downsampling via depthwise conv with stride.
+    Learns a kernel; normalization ensures kernel sum=1.
     """
-    
-    def __init__(self, scale_factor=2, num_channels=3, kernel_size=None, device=None):
+
+    def __init__(self, scale_factor: int = 2, num_channels: int = 3, kernel_size: int | None = None):
         super().__init__()
-        
-        self.scale_factor = scale_factor
-        self.num_channels = num_channels
-        self.device = device if device is not None else get_default_device()
-        
+        self.scale_factor = int(scale_factor)
+        self.num_channels = int(num_channels)
+
         if kernel_size is None:
-            kernel_size = 2 * scale_factor
-        self.kernel_size = kernel_size
-        
-        # Initialize with smooth kernel
-        init_kernel = self._create_init_kernel()
+            kernel_size = 2 * self.scale_factor
+        self.kernel_size = int(kernel_size)
+
+        init_kernel = torch.ones(1, 1, self.kernel_size, self.kernel_size, dtype=torch.float32)
+        init_kernel = init_kernel / init_kernel.sum()
         self.kernel = nn.Parameter(init_kernel)
-        
-    def forward(self, x):
-        """
-        Apply learned downsampling.
-        
-        Args:
-            x: Input image [B, C, H, W]
-            
-        Returns:
-            Downsampled image [B, C, H//scale, W//scale]
-        """
-        # Normalize kernel to sum to 1 (ensures no brightness change)
-        kernel = self.kernel / (self.kernel.sum() + 1e-8)
-        kernel = kernel.repeat(self.num_channels, 1, 1, 1)
-        
-        # FIXED: Calculate proper padding for exact downsampling
-        # For stride=s and kernel=k, to get output size = input//s, we need:
-        # output_size = (input_size + 2*pad - kernel_size) // stride + 1
-        # We want: input_size // stride = (input_size + 2*pad - kernel_size) // stride + 1
-        # This gives: pad = (kernel_size - stride) // 2
-        
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        k = self.kernel / (self.kernel.sum() + 1e-12)  # [1,1,K,K]
+        k = k.to(device=x.device, dtype=x.dtype).repeat(self.num_channels, 1, 1, 1)
+
         pad = (self.kernel_size - self.scale_factor) // 2
-        
-        # Use reflect padding to avoid boundary artifacts
-        x_padded = F.pad(x, (pad, pad, pad, pad), mode='reflect')
-        
-        downsampled = F.conv2d(
-            x_padded, 
-            kernel, 
-            stride=self.scale_factor,
-            groups=self.num_channels
-        )
-        
-        # Ensure exact size (crop if needed due to rounding)
+        x_padded = F.pad(x, (pad, pad, pad, pad), mode="reflect")
+
+        y = F.conv2d(x_padded, k, stride=self.scale_factor, groups=self.num_channels)
+
         target_h = x.shape[2] // self.scale_factor
         target_w = x.shape[3] // self.scale_factor
-        
-        if downsampled.shape[2] != target_h or downsampled.shape[3] != target_w:
-            downsampled = downsampled[:, :, :target_h, :target_w]
-        
-        return downsampled
-    
-    def _create_init_kernel(self):
-        """Initialize with a smooth averaging kernel"""
-        kernel = torch.ones(1, 1, self.kernel_size, self.kernel_size, 
-                          dtype=torch.float32, device=self.device)
-        kernel = kernel / kernel.sum()
-        return kernel
-    
-    def get_kernel(self):
-        """Get current kernel as numpy array"""
-        with torch.no_grad():
-            kernel = self.kernel / (self.kernel.sum() + 1e-8)
-            return kernel[0, 0].cpu().numpy()
+        if y.shape[2] != target_h or y.shape[3] != target_w:
+            y = y[:, :, :target_h, :target_w]
+        return y
 
+    def get_kernel(self) -> np.ndarray:
+        with torch.no_grad():
+            k = self.kernel / (self.kernel.sum() + 1e-12)
+            return k[0, 0].detach().cpu().numpy()
+
+
+# -----------------------------------------------------------------------------
+# Composite operator (no noise by default)
+# -----------------------------------------------------------------------------
 
 class CompositeOperator(nn.Module):
     """
-    Composite of multiple operators applied sequentially.
-    Useful for realistic degradation models (e.g., blur + downsample + noise).
-    
-    Args:
-        operators (list): List of nn.Module operators to apply in sequence
-        noise_level (float): Standard deviation of additive Gaussian noise
+    Sequential composition of operators: y = op_n(...op_2(op_1(x))...)
+    NOTE: Noise is NOT part of H by default. Keep noise in the likelihood.
     """
-    
-    def __init__(self, operators, noise_level=None):
+
+    def __init__(self, operators, noise_level: float | None = None):
         super().__init__()
-        
-        self.operators = nn.ModuleList(operators)
-        
+        self.operators = nn.ModuleList(list(operators))
+
         if noise_level is not None:
-            self.log_noise_std = nn.Parameter(
-                torch.log(torch.tensor(noise_level, dtype=torch.float32))
-            )
+            noise_level = float(noise_level)
+            if noise_level <= 0:
+                raise ValueError("noise_level must be > 0")
+            self.log_noise_std = nn.Parameter(torch.log(torch.tensor(noise_level, dtype=torch.float32)))
         else:
             self.log_noise_std = None
-    
-    def forward(self, x, add_noise=True):
-        """
-        Apply operators sequentially.
-        
-        Args:
-            x: Input image [B, C, H, W]
-            add_noise: Whether to add noise at the end
-            
-        Returns:
-            Degraded image
-        """
+
+    def forward(self, x: torch.Tensor, add_noise: bool = False) -> torch.Tensor:
         y = x
-        
-        # Apply each operator in sequence
         for op in self.operators:
             y = op(y)
-        
-        # Add noise if enabled
+
         if add_noise and self.log_noise_std is not None:
-            noise_std = torch.exp(self.log_noise_std)
+            noise_std = torch.exp(self.log_noise_std).to(device=y.device, dtype=y.dtype)
             y = y + noise_std * torch.randn_like(y)
-        
+
         return y
-    
-    def get_noise_level(self):
-        """Get current noise level"""
+
+    def get_noise_level(self) -> float:
         if self.log_noise_std is not None:
-            return torch.exp(self.log_noise_std).item()
+            return float(torch.exp(self.log_noise_std).item())
         return 0.0
 
 
-# ============================================================================
-# WRAPPER CLASS FOR COMPATIBILITY WITH PNP_FLOW DEGRADATION INTERFACE
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Compatibility wrapper
+# -----------------------------------------------------------------------------
 
 class LearnableDegradation:
     """
-    Wrapper class to make learnable operators compatible with the 
-    PNP_FLOW degradation interface (which expects H and H_adj functions).
-    
-    This allows blind operators to be used with the existing solve_ip method
-    with minimal modifications.
-    
-    Args:
-        operator: A learnable operator (nn.Module)
-        H_adj: Adjoint operator (for initialization and gradient computation)
-               Can be None if not needed
+    Wrapper to mimic the existing degradation interface (expects H and H_adj callables).
     """
-    
-    def __init__(self, operator, H_adj=None):
+
+    def __init__(self, operator: nn.Module, H_adj=None):
         self.operator = operator
         self._H_adj = H_adj
-        
-    def H(self, x):
-        """Forward operator"""
+
+    def H(self, x: torch.Tensor) -> torch.Tensor:
         return self.operator(x)
-    
-    def H_adj(self, y):
-        """Adjoint operator (transpose)"""
-        if self._H_adj is not None:
-            return self._H_adj(y)
-        else:
-            # Default: return input unchanged
-            return y
-    
-    def get_operator(self):
-        """Get the underlying learnable operator"""
+
+    def H_adj(self, y: torch.Tensor) -> torch.Tensor:
+        return self._H_adj(y) if self._H_adj is not None else y
+
+    def get_operator(self) -> nn.Module:
         return self.operator
 
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Factory + parameter extraction
+# -----------------------------------------------------------------------------
 
-def create_blind_operator(operator_type, device=None, **kwargs):
+def create_blind_operator(operator_type: str, **kwargs) -> nn.Module:
     """
-    Factory function to create learnable operators.
-    
-    Args:
-        operator_type (str): Type of operator ('gaussian_blur', 'motion_blur', 
-                            'mask', 'downsample', 'composite')
-        device (str): Device to place operator on
-        **kwargs: Additional parameters for the operator
-        
-    Returns:
-        Learnable operator (nn.Module)
-        
-    Example:
-        >>> blur = create_blind_operator('gaussian_blur', init_sigma=2.0)
-        >>> mask = create_blind_operator('mask', image_shape=(3, 128, 128))
+    operator_type: 'gaussian_blur', 'motion_blur', 'mask', 'downsample', 'composite'
     """
-    if device is None:
-        device = get_default_device()
-    
-    if operator_type == 'gaussian_blur':
-        return LearnableGaussianBlur(device=device, **kwargs)
-    
-    elif operator_type == 'motion_blur':
-        return LearnableMotionBlur(device=device, **kwargs)
-    
-    elif operator_type == 'mask':
-        return LearnableMask(device=device, **kwargs)
-    
-    elif operator_type == 'downsample':
-        return LearnableDownsampling(device=device, **kwargs)
-    
-    elif operator_type == 'composite':
-        # For composite, operators should be passed in kwargs
-        operators = kwargs.pop('operators', [])
+    if operator_type == "gaussian_blur":
+        return LearnableGaussianBlur(**kwargs)
+    if operator_type == "motion_blur":
+        return LearnableMotionBlur(**kwargs)
+    if operator_type == "mask":
+        # Backwards compatible: allow init_ratio as alias
+        if "init_ratio" in kwargs and "init_keep_ratio" not in kwargs:
+            kwargs["init_keep_ratio"] = kwargs.pop("init_ratio")
+        return LearnableMask(**kwargs)
+    if operator_type == "downsample":
+        return LearnableDownsampling(**kwargs)
+    if operator_type == "composite":
+        operators = kwargs.pop("operators", [])
         return CompositeOperator(operators, **kwargs)
-    
-    else:
-        raise ValueError(f"Unknown operator type: {operator_type}")
+    raise ValueError(f"Unknown operator type: {operator_type}")
 
 
-def get_operator_parameters(operator):
-    """
-    Extract current parameter values from a learnable operator.
-    
-    Args:
-        operator: Learnable operator
-        
-    Returns:
-        Dictionary of parameter names and values
-    """
+def get_operator_parameters(operator: nn.Module) -> dict:
     params = {}
-    
-    if hasattr(operator, 'get_sigma'):
-        params['sigma'] = operator.get_sigma()
-    
-    if hasattr(operator, 'get_params'):
+    if hasattr(operator, "get_sigma"):
+        params["sigma"] = operator.get_sigma()
+    if hasattr(operator, "get_params"):
         params.update(operator.get_params())
-    
-    if hasattr(operator, 'get_masked_ratio'):
-        params['mask_ratio'] = operator.get_masked_ratio()
-    
-    if hasattr(operator, 'get_noise_level'):
-        params['noise_level'] = operator.get_noise_level()
-    
+    if hasattr(operator, "get_masked_ratio"):
+        params["mask_ratio"] = operator.get_masked_ratio()
+    if hasattr(operator, "get_noise_level"):
+        params["noise_level"] = operator.get_noise_level()
+    if hasattr(operator, "get_keep_ratio"):
+        params["keep_ratio"] = operator.get_keep_ratio()
     return params
