@@ -11,6 +11,7 @@ Steps:
 
 import torch
 from typing import Dict
+from types import SimpleNamespace
 
 from pnpflow.blind_degradations import LearnableGaussianBlur
 from pnpflow.blind_data import (
@@ -47,9 +48,9 @@ def blind_alternating_descent(
         padding="reflect",
     ).to(device)
 
-    op_opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
+    opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
 
-    sigma_history, loss_history = [], []
+    sigma_hist, loss_hist = [], []
 
     for it in range(num_iters):
         x.requires_grad_(True)
@@ -61,20 +62,21 @@ def blind_alternating_descent(
         x = x.detach()
 
         if it % operator_update_freq == 0:
-            op_opt.zero_grad(set_to_none=True)
+            opt.zero_grad(set_to_none=True)
             loss_op = torch.mean((op(x.detach()) - prob.y) ** 2)
             loss_op.backward()
-            op_opt.step()
+            opt.step()
+            op.clamp_params_()
 
-        sigma_history.append(op.sigma().item())
-        loss_history.append(loss_x.item())
+        sigma_hist.append(op.sigma().item())
+        loss_hist.append(loss_x.item())
 
-    return {
-        "x": x,
-        "sigma_history": sigma_history,
-        "loss_history": loss_history,
-        "sigma_final": op.sigma().item(),
-    }
+    return dict(
+        x=x,
+        sigma_history=sigma_hist,
+        loss_history=loss_hist,
+        sigma_final=op.sigma().item(),
+    )
 
 
 # ============================================================
@@ -89,7 +91,7 @@ class _BlindDegradation:
         return self.op(x)
 
     def H_adj(self, r):
-        # Gaussian blur is approximately self-adjoint
+        # Approximate adjoint (OK for debugging; reflect padding is not exactly self-adjoint).
         return self.op(r)
 
 
@@ -104,15 +106,12 @@ def _single_image_pnp_flow_update(
     """
     Single-image PnP-Flow inner loop (blind-safe).
 
-    Key points:
-    - We neutralise internal /sigma_noise^2 scaling by setting sigma_noise = 1
-    - We do NOT scale lr by sigma_noise
-    - We guard against NaNs/Infs
+    - Neutralises internal /sigma_noise^2 scaling by setting sigma_noise = 1
+    - No gradient tracking
+    - Guards against NaNs/Infs
     """
     H, H_adj = degradation.H, degradation.H_adj
-
-    # Neutralise internal scaling in grad_datafit
-    pnp.args.sigma_noise = 1.0
+    pnp.args.sigma_noise = 1.0  # neutralise internal scaling
 
     delta = 1.0 / steps
     lr = float(pnp.args.lr_pnp)
@@ -149,15 +148,13 @@ def blind_pnp_flow_alternating(
     sigma_init: float,
     sigma_max: float,
     operator_lr: float = 3e-2,
-    operator_update_freq: int = 1,
-    outer_iters: int = 30,
-    pnp_lr_pnp: float = 0.05,          # SAFE default
+    operator_update_freq: int = 10,    # ✅ IMPORTANT: stable schedule
+    outer_iters: int = 80,
+    pnp_lr_pnp: float = 0.05,
     pnp_steps_inner: int = 25,
     warmup_outer_iters: int = 1,
     warmup_pnp_steps: int = 200,
 ) -> Dict:
-    from types import SimpleNamespace
-
     args = SimpleNamespace(
         method="pnp_flow",
         model="ot",
@@ -167,7 +164,7 @@ def blind_pnp_flow_alternating(
         num_samples=1,
         gamma_style="alpha_1_minus_t",
         alpha=1.0,
-        sigma_noise=1.0,   # neutralised
+        sigma_noise=1.0,
     )
 
     pnp = PNP_FLOW(model=model, device=device, args=args)
@@ -178,20 +175,17 @@ def blind_pnp_flow_alternating(
         padding="reflect",
     ).to(device)
 
-    op_opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
+    opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
 
     y = prob.y.to(device)
-    degradation = _BlindDegradation(op)
+    x = op(y).detach()  # H_adj(y) init
 
-    # Initialise x with H_adj(y)
-    x = degradation.H_adj(y).detach()
-
-    sigma_history, loss_history = [], []
+    sigma_hist, loss_hist = [], []
 
     for outer in range(outer_iters):
         degradation = _BlindDegradation(op)
 
-        # Warmup with fixed sigma
+        # Warmup: PnP only, fixed sigma (pure warmup)
         if outer < warmup_outer_iters:
             x = _single_image_pnp_flow_update(
                 pnp,
@@ -200,8 +194,9 @@ def blind_pnp_flow_alternating(
                 degradation=degradation,
                 steps=warmup_pnp_steps,
             ).detach()
+            continue
 
-        # Main PnP update
+        # PnP update
         x = _single_image_pnp_flow_update(
             pnp,
             x=x,
@@ -210,35 +205,45 @@ def blind_pnp_flow_alternating(
             steps=pnp_steps_inner,
         ).detach()
 
-        # Operator (sigma) update
+        # Operator update (less frequent to prevent drift)
         if outer % operator_update_freq == 0:
-            op_opt.zero_grad(set_to_none=True)
+            opt.zero_grad(set_to_none=True)
             loss_op = torch.mean((op(x.detach()) - y) ** 2)
             loss_op.backward()
+
             g = op.log_sigma.grad
             if g is None or not torch.isfinite(g).all():
                 raise RuntimeError("log_sigma grad is None or non-finite")
-            op_opt.step()
+
+            opt.step()
+            op.clamp_params_()
+
+            grad_mag = float(g.detach().abs().mean())
+        else:
+            grad_mag = float("nan")
 
         with torch.no_grad():
             loss_x = torch.mean((op(x) - y) ** 2).item()
 
-        sigma_history.append(op.sigma().item())
-        loss_history.append(loss_x)
+        sigma_hist.append(op.sigma().item())
+        loss_hist.append(loss_x)
 
         if outer % 5 == 0 or outer == outer_iters - 1:
-            print(
+            msg = (
                 f"[Outer {outer:03d}/{outer_iters}] "
                 f"sigma={op.sigma().item():.4f} "
                 f"loss={loss_x:.4e}"
             )
+            if outer % operator_update_freq == 0:
+                msg += f" |gradσ|={grad_mag:.3e}"
+            print(msg)
 
-    return {
-        "x": x,
-        "sigma_final": op.sigma().item(),
-        "sigma_history": sigma_history,
-        "loss_history": loss_history,
-    }
+    return dict(
+        x=x,
+        sigma_final=op.sigma().item(),
+        sigma_history=sigma_hist,
+        loss_history=loss_hist,
+    )
 
 
 # ============================================================
@@ -256,45 +261,33 @@ def _check_history_sanity(sigma_history, loss_history, name="Blind PnP-Flow"):
 
 
 # ============================================================
-# __main__ — Step 4 sanity run (Option A)
+# __main__ — Step 4 sanity run
 # ============================================================
 if __name__ == "__main__":
     torch.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ---- Load training config exactly ----
     cfg = load_cfg_from_cfg_file("./config/main_config.yaml")
-    dataset_cfg = load_cfg_from_cfg_file(
-        cfg.root + f"config/dataset_config/{cfg.dataset}.yaml"
-    )
-    cfg.update(dataset_cfg)
-    method_cfg = load_cfg_from_cfg_file(
-        cfg.root + f"config/method_config/{cfg.method}.yaml"
-    )
-    cfg.update(method_cfg)
+    cfg.update(load_cfg_from_cfg_file(cfg.root + f"config/dataset_config/{cfg.dataset}.yaml"))
+    cfg.update(load_cfg_from_cfg_file(cfg.root + f"config/method_config/{cfg.method}.yaml"))
 
     cfg.model = "ot"
     cfg.method = "pnp_flow"
-    cfg.problem = "gaussian_deblurring_FFT"
-    cfg.noise_type = "gaussian"
     cfg.num_channels = 3
-    cfg.dim_image = 128  # change to 64 if your checkpoint is 64×64
+    cfg.dim_image = 128
 
     model, state = define_model(cfg)
-    checkpoint_path = "./model/celeba/ot/model_final.pt"
-
     load_model(
         "ot",
         model,
         state,
         download=False,
-        checkpoint_path=checkpoint_path,
+        checkpoint_path="./model/celeba/ot/model_final.pt",
         dataset=None,
         device=device,
     )
     model.eval()
 
-    # ---- Synthetic blind problem ----
     x_gt = torch.randn(1, 3, cfg.dim_image, cfg.dim_image, device=device)
 
     prob = make_blind_gaussian_blur_problem(
