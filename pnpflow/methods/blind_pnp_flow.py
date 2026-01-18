@@ -1,5 +1,10 @@
 """
-Blind PnP-Flow Matching — Step 5 Only
+Blind PnP-Flow Matching — Step 5 Only (Fixed)
+
+Fixes:
+- Avoid identity trap (x=y + data-only warmup => sigma->0)
+- Enforce sigma freeze while x moves under prior gating
+- Optional real-image x_gt loading for in-distribution prior behaviour
 
 Step 5 goals:
 - Data-term-only warmup (no prior)
@@ -9,6 +14,7 @@ Step 5 goals:
 - Sigma-neutral image initialisation
 """
 
+import os
 import torch
 from typing import Dict
 from types import SimpleNamespace
@@ -37,9 +43,29 @@ class _BlindDegradation:
     def H(self, x: torch.Tensor) -> torch.Tensor:
         return self.op(x)
 
-    def H_adj(self, r: torch.Tensor) -> torch.Tensor:
+    """def H_adj(self, r: torch.Tensor) -> torch.Tensor:
         # Approximate adjoint (acceptable for Gaussian + reflect padding)
-        return self.op(r)
+        return self.op(r)"""
+        
+    def H_adj(self, r: torch.Tensor) -> torch.Tensor:
+        """
+        Approximate true adjoint of Gaussian blur under reflect padding.
+        Critical for unbiased sigma gradients.
+        """
+        sigma = self.op.sigma()
+        k = self.op._make_kernel_2d(
+            sigma,
+            device=r.device,
+            dtype=r.dtype
+        )
+        k = torch.flip(k, dims=[0, 1])  # transpose kernel
+
+        c = r.shape[1]
+        weight = k.view(1, 1, *k.shape).repeat(c, 1, 1, 1)
+        pad = k.shape[-1] // 2
+
+        r_pad = torch.nn.functional.pad(r, (pad, pad, pad, pad), mode="reflect")
+        return torch.nn.functional.conv2d(r_pad, weight, groups=c)
 
 
 # ============================================================
@@ -127,7 +153,7 @@ def _pnp_flow_update_gated(
 
 
 # ============================================================
-# Step 5 — Identifiability-controlled blind PnP-Flow
+# Step 5 — Identifiability-controlled blind PnP-Flow (fixed)
 # ============================================================
 def blind_pnp_flow_step5(
     prob: BlindGaussianBlurProblem,
@@ -139,28 +165,31 @@ def blind_pnp_flow_step5(
     # operator updates
     operator_lr: float = 1e-2,
     sigma_update_every: int = 1,
+    sigma_freeze_outer_iters: int = 10,    # ✅ KEY FIX: freeze sigma early
     # image updates
     outer_iters: int = 60,
-    image_updates_per_sigma: int = 10,
+    image_updates_per_outer: int = 10,     # ✅ many x updates per outer
     # data-only warmup / anchoring
-    warmup_data_steps: int = 200,
+    warmup_data_steps: int = 20,           # ✅ KEY FIX: do NOT overfit warmup
     data_only_between: int = 0,
     image_lr_data_only: float = 1e-1,
     # PnP
     pnp_lr_pnp: float = 0.05,
     pnp_steps_inner: int = 25,
     # prior gating
-    lam_max: float = 0.7,
-    lam_ramp_iters: int = 30,
+    lam_max: float = 0.8,
+    lam_ramp_iters: int = 20,              # ✅ ramp faster so x leaves y
     # safety
     clip_sigma_grad_norm: float = 1.0,
+    # debugging
+    print_every: int = 5,
 ) -> Dict:
     """
-    Step 5 pipeline:
-    - DATA-ONLY warmup
-    - Many image updates per sigma update
-    - Sigma updated from DATA TERM ONLY
-    - Prior strength ramped slowly
+    Fixed Step 5:
+    - Initialise x away from y to avoid identity basin.
+    - Do a short data-only warmup (not enough to make loss ~ 0).
+    - Ramp prior (lam) while sigma is frozen, to move x into a prior-consistent region.
+    - Only then allow sigma updates from data term.
     """
 
     # --- PnP setup ---
@@ -189,13 +218,14 @@ def blind_pnp_flow_step5(
     # --- Data ---
     y = prob.y.to(device)
 
-    # Step-5: sigma-neutral init
-    x = y.detach().clone()
+    # ✅ KEY FIX: sigma-neutral init (prevents "make H identity" trap)
+    x = torch.randn_like(y)
 
-    sigma_hist, loss_hist, grad_hist, lam_hist = [], [], [], []
+    sigma_hist, loss_hist, grad_hist, lam_hist, x_y_hist = [], [], [], [], []
 
-    # --- Data-only warmup ---
     degradation = _BlindDegradation(op)
+
+    # --- Short data-only warmup (do NOT drive loss to ~0) ---
     if warmup_data_steps > 0:
         x = _data_only_update(
             x=x,
@@ -205,15 +235,14 @@ def blind_pnp_flow_step5(
             image_lr=image_lr_data_only,
         ).detach()
 
-    # --- Alternating optimisation ---
     for outer in range(int(outer_iters)):
         degradation = _BlindDegradation(op)
 
-        lam = lam_max * min(1.0, outer / max(1, lam_ramp_iters))
+        lam = float(lam_max) * float(min(1.0, outer / max(1, int(lam_ramp_iters))))
         lam_hist.append(lam)
 
-        # image updates (time-scale separation)
-        for _ in range(int(image_updates_per_sigma)):
+        # multiple image updates per outer
+        for _ in range(int(image_updates_per_outer)):
             if data_only_between > 0:
                 x = _data_only_update(
                     x=x,
@@ -232,12 +261,31 @@ def blind_pnp_flow_step5(
                 lam=lam,
             ).detach()
 
-        # sigma update (DATA TERM ONLY)
-        if outer % max(1, sigma_update_every) == 0:
+        # sigma update: only after freeze period
+        """do_sigma = (
+            outer >= int(sigma_freeze_outer_iters)
+            and (outer % max(1, int(sigma_update_every)) == 0)
+        )"""
+        
+        # Identity-basin guard: do NOT update sigma if x ≈ y
+        with torch.no_grad():
+            x_y_dist = torch.mean(torch.abs(x - y)).item()
+
+        do_sigma = (
+            outer >= int(sigma_freeze_outer_iters)
+            and (outer % max(1, int(sigma_update_every)) == 0)
+            and (x_y_dist > 1e-3)   # <<< CRITICAL
+        )
+
+
+        if do_sigma:
             opt.zero_grad(set_to_none=True)
             loss_op = torch.mean((op(x.detach()) - y) ** 2)
-            loss_op.backward()
+            # loss_op.backward()
+            sigma_grad_scale = 0.1   # conservative; try 0.01 if needed
+            (loss_op * sigma_grad_scale).backward()
 
+ 
             g = op.log_sigma.grad
             if g is None or not torch.isfinite(g).all():
                 raise RuntimeError("Invalid log_sigma gradient")
@@ -255,20 +303,25 @@ def blind_pnp_flow_step5(
 
         with torch.no_grad():
             loss_x = torch.mean((op(x) - y) ** 2).item()
+            x_y = torch.mean(torch.abs(x - y)).item()
 
         sigma_hist.append(op.sigma().item())
         loss_hist.append(loss_x)
         grad_hist.append(grad_mag)
+        x_y_hist.append(x_y)
 
-        if outer % 5 == 0 or outer == outer_iters - 1:
+        if (outer % int(print_every) == 0) or (outer == outer_iters - 1):
             msg = (
                 f"[Step5 {outer:03d}/{outer_iters}] "
                 f"lam={lam:.3f} "
                 f"sigma={op.sigma().item():.4f} "
-                f"loss={loss_x:.4e}"
+                f"loss={loss_x:.4e} "
+                f"|x-y|={x_y:.3e}"
             )
-            if not torch.isnan(torch.tensor(grad_mag)):
+            if do_sigma:
                 msg += f" |gradσ|={grad_mag:.3e}"
+            else:
+                msg += " |gradσ|=FROZEN"
             print(msg)
 
     return dict(
@@ -278,7 +331,34 @@ def blind_pnp_flow_step5(
         loss_history=loss_hist,
         grad_sigma_history=grad_hist,
         lam_history=lam_hist,
+        x_minus_y_history=x_y_hist,
     )
+
+
+# ============================================================
+# Optional: load a real image for in-distribution prior behaviour
+# ============================================================
+def _load_image_as_tensor(path: str, *, size: int, device) -> torch.Tensor:
+    """
+    Loads an RGB image from disk and returns (1,3,H,W) float tensor in [0,1].
+    Uses torchvision/PIL if available.
+    """
+    try:
+        from PIL import Image
+        from torchvision import transforms
+    except Exception as e:
+        raise RuntimeError(
+            "To load real images, install pillow + torchvision, "
+            "or remove IMAGE_PATH to use synthetic random x_gt."
+        ) from e
+
+    img = Image.open(path).convert("RGB")
+    tfm = transforms.Compose([
+        transforms.Resize((size, size)),
+        transforms.ToTensor(),  # [0,1], (C,H,W)
+    ])
+    x = tfm(img).unsqueeze(0).to(device=device)
+    return x
 
 
 # ============================================================
@@ -309,7 +389,17 @@ if __name__ == "__main__":
     )
     model.eval()
 
-    x_gt = torch.randn(1, 3, cfg.dim_image, cfg.dim_image, device=device)
+    # Optional: set an environment variable IMAGE_PATH=/path/to/face.jpg
+    image_path = os.environ.get("IMAGE_PATH", "").strip()
+
+    if image_path:
+        x_gt = _load_image_as_tensor(image_path, size=cfg.dim_image, device=device)
+        print(f"Loaded x_gt from: {image_path}")
+    else:
+        # Still runs, but the flow prior is not a "prior" for Gaussian noise.
+        x_gt = torch.randn(1, 3, cfg.dim_image, cfg.dim_image, device=device)
+        print("WARNING: Using random x_gt. Flow prior is out-of-distribution; sigma behaviour may be misleading.")
+        print("Set IMAGE_PATH=/path/to/image.jpg for an in-distribution test.")
 
     prob = make_blind_gaussian_blur_problem(
         x_gt=x_gt,
@@ -326,11 +416,15 @@ if __name__ == "__main__":
         device=device,
         sigma_init=0.4,
         sigma_max=6.0,
+        operator_lr=1e-2,
+        sigma_update_every=1,
+        sigma_freeze_outer_iters=10,  
         outer_iters=40,
-        image_updates_per_sigma=10,
-        warmup_data_steps=200,
-        lam_max=0.7,
-        lam_ramp_iters=30,
+        image_updates_per_outer=10,    
+        warmup_data_steps=20,          
+        lam_max=0.8,
+        lam_ramp_iters=20,
+        print_every=5,
     )
 
     print(f"\nFinal sigma: {out['sigma_final']:.4f} (true: 1.2)")
