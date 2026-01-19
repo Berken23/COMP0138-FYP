@@ -32,9 +32,7 @@ from pnpflow.utils import (
 )
 
 
-# ============================================================
 # Degradation adapter
-# ============================================================
 class _BlindDegradation:
     """Expose H and H_adj for PNP_FLOW."""
     def __init__(self, op: LearnableGaussianBlur):
@@ -64,9 +62,7 @@ class _BlindDegradation:
         return F.conv2d(r_pad, weight, groups=c)
 
 
-# ============================================================
 # Data-term-only image update (warmup + anchoring)
-# ============================================================
 def _data_only_update(
     *,
     x: torch.Tensor,
@@ -94,9 +90,7 @@ def _data_only_update(
     return x
 
 
-# ============================================================
 # Gated PnP-Flow image update
-# ============================================================
 def _pnp_flow_update_gated(
     pnp: PNP_FLOW,
     *,
@@ -148,9 +142,7 @@ def _pnp_flow_update_gated(
     return x
 
 
-# ============================================================
 # Single-image
-# ============================================================
 def blind_pnp_flow_step5(
     prob: BlindGaussianBlurProblem,
     *,
@@ -306,9 +298,7 @@ def blind_pnp_flow_step5(
     )
 
 
-# ============================================================
 # Multi-image shared sigma
-# ============================================================
 def blind_pnp_flow_step6(
     probs: List[BlindGaussianBlurProblem],
     *,
@@ -490,9 +480,7 @@ def blind_pnp_flow_step6(
     )
 
 
-# ============================================================
 # Load real images for in-distribution prior behaviour
-# ============================================================
 def _load_image_as_tensor(path: str, *, size: int, device) -> torch.Tensor:
     """
     Loads an RGB image from disk and returns (1,3,H,W) float tensor in [0,1].
