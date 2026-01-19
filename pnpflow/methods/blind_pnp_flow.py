@@ -149,7 +149,7 @@ def _pnp_flow_update_gated(
 
 
 # ============================================================
-# Step 5 — Single-image
+# Single-image
 # ============================================================
 def blind_pnp_flow_step5(
     prob: BlindGaussianBlurProblem,
@@ -307,7 +307,7 @@ def blind_pnp_flow_step5(
 
 
 # ============================================================
-# Step 6 — Multi-image shared sigma
+# Multi-image shared sigma
 # ============================================================
 def blind_pnp_flow_step6(
     probs: List[BlindGaussianBlurProblem],
@@ -491,7 +491,7 @@ def blind_pnp_flow_step6(
 
 
 # ============================================================
-# Optional: load real images for in-distribution prior behaviour
+# Load real images for in-distribution prior behaviour
 # ============================================================
 def _load_image_as_tensor(path: str, *, size: int, device) -> torch.Tensor:
     """
@@ -525,9 +525,6 @@ def _list_image_files(image_dir: str) -> List[str]:
             files.append(p)
     return files
 
-# ============================================================
-# __main__ — Automated Step 6 sweep (B = 1,2,4,8)
-# ============================================================
 if __name__ == "__main__":
     torch.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -553,9 +550,6 @@ if __name__ == "__main__":
     )
     model.eval()
 
-    # ------------------------------------------------------------
-    # Load images ONCE (shared across all batch sizes)
-    # ------------------------------------------------------------
     image_dir = "./data/celeba/sub-folder"
 
     sigma_true = 1.2
@@ -586,9 +580,6 @@ if __name__ == "__main__":
     print(f"Loaded {len(x_gts)} images from {image_dir}")
 
 
-    # ------------------------------------------------------------
-    # Run Step 6 automatically for B = 1,2,4,8
-    # ------------------------------------------------------------
     batch_sizes = [4, 8] # REMEMBER TO ADD BACK 1 AND 2
     results = []
 
@@ -637,9 +628,7 @@ if __name__ == "__main__":
             }
         )
 
-    # ------------------------------------------------------------
-    # Summary table (this is what you put in the dissertation)
-    # ------------------------------------------------------------
+    # Summary table
     print("\n" + "=" * 60)
     print("Step 6 Summary: Final sigma vs batch size")
     print("=" * 60)

@@ -27,4 +27,4 @@ jobs:
       - name: Run Step 6 (batch sizes 4 and 8)
         run: |
           echo "Running Step 6 automated sweep (B=4,8)"
-          python blind_pnp_flow.py
+          python pnpflow/methods/blind_pnp_flow.py
