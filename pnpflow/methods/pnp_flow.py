@@ -114,7 +114,7 @@ class PNP_FLOW(object):
                     for _ in range(num_samples):
                         z_tilde = self.interpolation_step(
                             z, t1.view(-1, 1, 1, 1))
-                        x_new += self.denoiser(z_tilde, t1)
+                        x_new += self.denoiser(z_tilde, t1) # Grab the images at this step
 
                     x_new /= num_samples
                     x = x_new
