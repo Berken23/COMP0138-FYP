@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e . --no-deps
-          pip install torch torchvision torchdiffeq pillow pyyaml numpy matplotlib pytorch-ignite torchmetrics
+          pip install torch torchvision torchdiffeq pillow pyyaml numpy matplotlib pytorch-ignite torchmetrics opencv-python
 
       - name: Run Step 6 (batch sizes 4 and 8)
         run: |
