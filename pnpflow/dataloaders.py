@@ -30,8 +30,9 @@ class DataLoaders:
                 v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
             # Paths
-            img_dir = './data/celeba/img_align_celeba/img_align_celeba'
-            partition_csv = './data/celeba/list_eval_partition.csv'
+            _base = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data', 'celeba')
+            img_dir = os.path.join(_base, 'img_align_celeba', 'img_align_celeba')
+            partition_csv = os.path.join(_base, 'list_eval_partition.csv')
 
             # Datasets
             train_dataset = CelebADataset(

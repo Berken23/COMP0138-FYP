@@ -75,6 +75,13 @@ class LearnableGaussianBlur(nn.Module):
         hi = math.log(self.sigma_max)
         self.log_sigma.clamp_(min=lo, max=hi)
 
+    @torch.no_grad()
+    def set_sigma_(self, value: float) -> None:
+        """Set sigma in-place by updating log_sigma."""
+        if value <= 0:
+            raise ValueError("sigma must be > 0")
+        self.log_sigma.fill_(math.log(float(value)))
+
     def _make_kernel_2d(self, sigma: torch.Tensor, device, dtype) -> torch.Tensor:
         """
         Build a 2D Gaussian kernel using torch ops.

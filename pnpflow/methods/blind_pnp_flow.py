@@ -1,627 +1,482 @@
 """
-Blind PnP-Flow Matching — Step 5 + Step 6
+Blind PnP-Flow — clean implementation.
 
-Step 5: Single-image, identifiability-controlled blind PnP-Flow (expected: sigma moves a bit, then plateaus)
-Step 6: Multi-image blind estimation with a shared operator (expected: sigma moves further toward sigma_true as batch size increases)
+Build layers:
+  Layer 1: blind_alternating_descent     — data-fit only, no generative prior
+  Layer 2: blind_pnp_flow_single         — single image, PnP-Flow prior (Aim 4, 5)
+  Layer 3: blind_pnp_flow_multi          — shared sigma, B images (Aim 5, 6)
 
-Controls:
-- Identity trap avoidance
-- Sigma freeze while x moves under gated prior
-- Corrected adjoint (transpose kernel conv)
-- Identity-basin guard for sigma updates
-- Sigma gradient scaling + clipping
+Mathematical setup
+------------------
+Forward model:  y_i = H_{theta}(x_i) + eps_i,   eps_i ~ N(0, sigma_noise^2 I)
+H_{theta} = isotropic Gaussian blur with learnable sigma (theta = log_sigma).
+H is self-adjoint for symmetric Gaussian kernels (H^T = H).
+
+x update  (data gradient):  x <- x - lr * H(H(x) - y)
+sigma update (operator):    Adam on  (1/B) sum_i || H_{sigma}(x_i) - y_i ||^2
+
+Initialisation insight
+----------------------
+x_init = y  is intentional: with sigma_init << sigma_true,  H(y) is *more* blurry
+than y, so H(y) - y < 0, and the gradient step sharpens x.  A sharper x than y
+makes the sigma gradient point toward larger sigma, avoiding the identity trap.
 """
+from __future__ import annotations
 
-import os
 from typing import Dict, List, Optional
-from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
 
 from pnpflow.blind_degradations import LearnableGaussianBlur
-from pnpflow.blind_data import (
-    BlindGaussianBlurProblem,
-    make_blind_gaussian_blur_problem,
-)
-from pnpflow.methods.pnp_flow import PNP_FLOW
-from pnpflow.utils import (
-    load_cfg_from_cfg_file,
-    define_model,
-    load_model,
-)
+from pnpflow.blind_data import BlindGaussianBlurProblem
 
 
-# Degradation adapter
-class _BlindDegradation:
-    """Expose H and H_adj for PNP_FLOW."""
-    def __init__(self, op: LearnableGaussianBlur):
-        self.op = op
+# ---------------------------------------------------------------------------
+# Internal: model forward pass  (supports "ot" U-Net and "rectified" NCSNpp)
+# ---------------------------------------------------------------------------
 
-    def H(self, x: torch.Tensor) -> torch.Tensor:
-        return self.op(x)
-
-    def H_adj(self, r: torch.Tensor) -> torch.Tensor:
-        """
-        Approximate true adjoint of Gaussian blur under reflect padding.
-        Critical for unbiased sigma gradients.
-        """
-        sigma = self.op.sigma()
-        k = self.op._make_kernel_2d(
-            sigma,
-            device=r.device,
-            dtype=r.dtype
-        )
-        k = torch.flip(k, dims=[0, 1])  # transpose kernel
-
-        c = r.shape[1]
-        weight = k.view(1, 1, *k.shape).repeat(c, 1, 1, 1)
-        pad = k.shape[-1] // 2
-
-        r_pad = F.pad(r, (pad, pad, pad, pad), mode="reflect")
-        return F.conv2d(r_pad, weight, groups=c)
+def _model_velocity(model, x: torch.Tensor, t: torch.Tensor, model_type: str) -> torch.Tensor:
+    """Return the flow velocity v_theta(x, t)."""
+    if model_type == "ot":
+        return model(x, t)
+    elif model_type == "rectified":
+        import pnpflow.image_generation.models.utils as mutils
+        model_fn = mutils.get_model_fn(model, train=False)
+        return model_fn(x.float(), t * 999)
+    else:
+        raise ValueError(f"Unknown model_type '{model_type}'. Choose 'ot' or 'rectified'.")
 
 
-# Data-term-only image update (warmup + anchoring)
-def _data_only_update(
+# ---------------------------------------------------------------------------
+# Internal: PnP-Flow building blocks
+# ---------------------------------------------------------------------------
+
+def _lr_schedule(lr: float, t: float, style: str, alpha: float = 1.0) -> float:
+    """Step-size schedule gamma(t)."""
+    if style == "1_minus_t":
+        return lr * (1.0 - t)
+    elif style == "sqrt_1_minus_t":
+        return lr * (1.0 - t) ** 0.5
+    elif style == "alpha_1_minus_t":
+        return lr * (1.0 - t) ** alpha
+    elif style == "constant":
+        return lr
+    else:
+        raise ValueError(f"Unknown gamma_style '{style}'.")
+
+
+def _interpolate(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """
+    Place x on the flow trajectory at time t:
+        x_tilde = t * x + (1 - t) * eps,   eps ~ N(0, I)
+    t shape: (B,) or (B,1,1,1)
+    """
+    t_vec = t.view(-1, 1, 1, 1)
+    return t_vec * x + (1.0 - t_vec) * torch.randn_like(x)
+
+
+def _denoiser(model, x: torch.Tensor, t: torch.Tensor, model_type: str) -> torch.Tensor:
+    """
+    Flow-matching denoiser at time t:
+        D(x, t) = x + (1 - t) * v_theta(x, t)
+    Returns a clean-image estimate.
+    """
+    t_vec = t.view(-1, 1, 1, 1)
+    v = _model_velocity(model, x, t, model_type)
+    return x + (1.0 - t_vec) * v
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: blind_alternating_descent  (data-fit only, no prior)
+#
+# Purpose: establish the blind alternating loop, study update orderings and
+# convergence without any generative prior.  Corresponds to Aim 4 (baseline).
+#
+# Contract guaranteed by tests (test_blind_alternating_loop.py):
+#   - sigma moves in the correct direction (toward sigma_true)
+#   - sigma stays finite and bounded
+#   - data-consistency loss decreases on average
+# ---------------------------------------------------------------------------
+
+def blind_alternating_descent(
+    prob: BlindGaussianBlurProblem,
     *,
-    x: torch.Tensor,
+    sigma_init: float,
+    sigma_max: float,
+    num_iters: int = 300,
+    operator_lr: float = 5e-2,
+    image_lr: float = 1e-1,
+    operator_update_freq: int = 5,
+    print_every: int = 0,
+) -> Dict:
+    """
+    Alternating gradient descent between x and sigma — no generative prior.
+
+    x  update (every iter):       x  <- x - image_lr * H(H(x) - y)
+    sigma update (every freq):    Adam on  || H_sigma(x.detach()) - y ||^2
+
+    Initialisation: x = y  (blurry observation).
+    With sigma_init < sigma_true, H(y) is MORE blurry than y, so H(y)-y < 0,
+    and the x step sharpens x slightly.  This makes the sigma gradient point
+    toward larger sigma (away from the identity trap).
+
+    Returns
+    -------
+    dict with keys: x, sigma_final, sigma_history, loss_history
+    """
+    device = prob.y.device
+    y = prob.y.to(device)
+
+    op = LearnableGaussianBlur(
+        init_sigma=sigma_init,
+        sigma_max=sigma_max,
+        padding="reflect",
+    ).to(device=device, dtype=y.dtype)
+
+    opt_sigma = torch.optim.Adam(op.parameters(), lr=operator_lr)
+
+    # Initialise x at the blurry observation (see docstring for why this works)
+    x = y.clone().detach()
+
+    sigma_hist: List[float] = []
+    loss_hist: List[float] = []
+
+    for k in range(num_iters):
+
+        # --- x update: gradient descent on (1/2)||H(x) - y||^2  ---
+        # gradient = H^T(H(x) - y) = H(H(x) - y)  [H symmetric]
+        with torch.no_grad():
+            residual = op(x) - y          # H(x) - y
+            grad_x = op(residual)         # H( H(x) - y )
+            x = x - image_lr * grad_x
+
+        # --- sigma update: Adam on ||H_sigma(x.detach()) - y||^2 ---
+        if (k + 1) % operator_update_freq == 0:
+            opt_sigma.zero_grad(set_to_none=True)
+            loss_op = torch.mean((op(x.detach()) - y) ** 2)
+            loss_op.backward()
+            opt_sigma.step()
+            op.clamp_params_()
+
+        # logging
+        with torch.no_grad():
+            loss_val = torch.mean((op(x) - y) ** 2).item()
+        sigma_hist.append(op.sigma().item())
+        loss_hist.append(loss_val)
+
+        if print_every > 0 and (k % print_every == 0 or k == num_iters - 1):
+            print(
+                f"[alt_descent {k:04d}/{num_iters}]  "
+                f"sigma={op.sigma().item():.4f}  loss={loss_val:.4e}"
+            )
+
+    return {
+        "x": x,
+        "sigma_final": op.sigma().item(),
+        "sigma_history": sigma_hist,
+        "loss_history": loss_hist,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: blind_pnp_flow_single  (single image, PnP-Flow prior)
+#
+# Alternating scheme:
+#   x step:     run a full PnP-Flow trajectory (t: 0 -> 1) with sigma frozen
+#   sigma step: Adam on || H_sigma(x.detach()) - y ||^2
+#
+# Corresponds to Aims 4 and 5.
+# ---------------------------------------------------------------------------
+
+def _pnp_flow_trajectory(
+    model,
+    *,
+    x_init: torch.Tensor,
     y: torch.Tensor,
-    degradation: _BlindDegradation,
-    steps: int,
-    image_lr: float,
+    op: LearnableGaussianBlur,
+    sigma_noise: float,
+    num_steps: int,
+    lr: float,
+    gamma_style: str = "1_minus_t",
+    alpha: float = 1.0,
+    num_samples: int = 1,
+    model_type: str = "ot",
 ) -> torch.Tensor:
     """
-    Minimise ||H(x) - y||^2 using gradient descent.
-    No prior, no denoiser.
+    Run one full PnP-Flow trajectory for x with sigma frozen.
+
+    For k = 0, ..., num_steps-1:
+        t_k  = k / num_steps
+        z    = x - lr(t_k) * H(H(x) - y) / sigma_noise^2
+        x    = mean over S samples of  D( interp(z, t_k), t_k )
     """
-    H, H_adj = degradation.H, degradation.H_adj
+    device = x_init.device
+    x = x_init.clone()
+    delta = 1.0 / num_steps
 
     with torch.no_grad():
-        for _ in range(int(steps)):
-            r = H(x) - y
-            grad = 2.0 * H_adj(r)
-            x = x - float(image_lr) * grad
+        for k in range(num_steps):
+            t_scalar = delta * k
+            t = torch.full((len(x),), t_scalar, device=device)
 
-            if not torch.isfinite(x).all():
-                raise FloatingPointError(
-                    "Non-finite x in data-only update. Reduce image_lr."
-                )
+            # data-fit gradient step: H^T(H(x) - y) = H(H(x) - y)
+            residual = op(x) - y
+            grad = op(residual)
+            lr_k = _lr_schedule(lr, t_scalar, gamma_style, alpha)
+            z = x - lr_k * grad
+
+            # denoiser step (average S noise samples)
+            x_new = torch.zeros_like(x)
+            for _ in range(num_samples):
+                z_tilde = _interpolate(z, t)
+                x_new = x_new + _denoiser(model, z_tilde, t, model_type)
+            x = x_new / num_samples
+
     return x
 
 
-# Gated PnP-Flow image update
-def _pnp_flow_update_gated(
-    pnp: PNP_FLOW,
-    *,
-    x: torch.Tensor,
-    y: torch.Tensor,
-    degradation: _BlindDegradation,
-    steps: int,
-    lam: float,
-) -> torch.Tensor:
-    """
-    Gated PnP update.
-
-    lam = 0 → pure data step
-    lam = 1 → pure PnP step
-    """
-    H, H_adj = degradation.H, degradation.H_adj
-    pnp.args.sigma_noise = 1.0  # neutralise internal scaling
-
-    delta = 1.0 / steps
-    lr = float(pnp.args.lr_pnp)
-    lam = float(max(0.0, min(1.0, lam)))
-
-    with torch.no_grad():
-        for i in range(int(steps)):
-            t = torch.ones(len(x), device=x.device) * delta * i
-            lr_t = pnp.learning_rate_strat(lr, t)
-
-            grad = pnp.grad_datafit(x, y, H, H_adj)
-            z = x - lr_t * grad
-
-            if not torch.isfinite(z).all():
-                raise FloatingPointError(
-                    "Non-finite z in PnP update. Reduce pnp_lr_pnp."
-                )
-
-            x_pnp = torch.zeros_like(x)
-            for _ in range(pnp.args.num_samples):
-                z_tilde = pnp.interpolation_step(z, t.view(-1, 1, 1, 1))
-                x_pnp += pnp.denoiser(z_tilde, t)
-            x_pnp /= pnp.args.num_samples
-
-            x = (1.0 - lam) * z + lam * x_pnp
-
-            if not torch.isfinite(x).all():
-                raise FloatingPointError(
-                    "Non-finite x after PnP gating. Reduce lam or lr."
-                )
-
-    return x
-
-
-# Single-image
-def blind_pnp_flow_step5(
+def blind_pnp_flow_single(
     prob: BlindGaussianBlurProblem,
     *,
     model,
     device,
     sigma_init: float,
     sigma_max: float,
-    # operator updates
+    # outer alternating loop
+    outer_iters: int = 60,
+    # x update (PnP-Flow trajectory)
+    pnp_steps: int = 50,
+    pnp_lr: float = 0.05,
+    sigma_noise: float = 0.05,
+    gamma_style: str = "1_minus_t",
+    alpha: float = 1.0,
+    num_samples: int = 1,
+    model_type: str = "ot",
+    # sigma update
     operator_lr: float = 1e-2,
     sigma_update_every: int = 1,
-    sigma_freeze_outer_iters: int = 10,
-    # image updates
-    outer_iters: int = 60,
-    image_updates_per_outer: int = 10,
-    # data-only warmup / anchoring
-    warmup_data_steps: int = 20,
-    data_only_between: int = 0,
-    image_lr_data_only: float = 1e-1,
-    # PnP
-    pnp_lr_pnp: float = 0.05,
-    pnp_steps_inner: int = 25,
-    # prior gating
-    lam_max: float = 0.8,
-    lam_ramp_iters: int = 20,
-    # safety
-    clip_sigma_grad_norm: float = 1.0,
-    sigma_grad_scale: float = 0.1,
-    x_y_threshold: float = 1e-3,
-    # debugging
-    print_every: int = 5,
+    sigma_freeze_iters: int = 5,
+    clip_grad_norm: float = 1.0,
+    # debug
+    print_every: int = 10,
 ) -> Dict:
-    args = SimpleNamespace(
-        method="pnp_flow",
-        model="ot",
-        noise_type="gaussian",
-        lr_pnp=pnp_lr_pnp,
-        steps_pnp=pnp_steps_inner,
-        num_samples=1,
-        gamma_style="alpha_1_minus_t",
-        alpha=1.0,
-        sigma_noise=1.0,
-    )
-    pnp = PNP_FLOW(model=model, device=device, args=args)
+    """
+    Single-image blind PnP-Flow (Aims 4, 5).
+
+    Outer loop:
+      1. x  <- PnP-Flow trajectory  (pnp_steps steps, sigma frozen)
+      2. sigma <- Adam step on  || H_sigma(x.detach()) - y ||^2
+
+    Parameters
+    ----------
+    sigma_freeze_iters : int
+        Number of outer iterations before sigma is allowed to update.
+        This gives x time to stabilise before operator estimation begins.
+    """
+    y = prob.y.to(device)
 
     op = LearnableGaussianBlur(
         init_sigma=sigma_init,
         sigma_max=sigma_max,
         padding="reflect",
-    ).to(device)
+    ).to(device=device, dtype=y.dtype)
 
-    opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
+    opt_sigma = torch.optim.Adam(op.parameters(), lr=operator_lr)
 
-    y = prob.y.to(device)
-    x = torch.randn_like(y)
+    x = y.clone().detach()
 
-    sigma_hist, loss_hist, grad_hist, lam_hist, x_y_hist = [], [], [], [], []
+    sigma_hist: List[float] = []
+    loss_hist: List[float] = []
+    grad_sigma_hist: List[float] = []
 
-    degradation = _BlindDegradation(op)
+    for outer in range(outer_iters):
 
-    if warmup_data_steps > 0:
-        x = _data_only_update(
-            x=x,
+        # --- x update ---
+        x = _pnp_flow_trajectory(
+            model,
+            x_init=x,
             y=y,
-            degradation=degradation,
-            steps=warmup_data_steps,
-            image_lr=image_lr_data_only,
+            op=op,
+            sigma_noise=sigma_noise,
+            num_steps=pnp_steps,
+            lr=pnp_lr,
+            gamma_style=gamma_style,
+            alpha=alpha,
+            num_samples=num_samples,
+            model_type=model_type,
         ).detach()
 
-    for outer in range(int(outer_iters)):
-        degradation = _BlindDegradation(op)
-
-        lam = float(lam_max) * float(min(1.0, outer / max(1, int(lam_ramp_iters))))
-        lam_hist.append(lam)
-
-        for _ in range(int(image_updates_per_outer)):
-            if data_only_between > 0:
-                x = _data_only_update(
-                    x=x,
-                    y=y,
-                    degradation=degradation,
-                    steps=data_only_between,
-                    image_lr=image_lr_data_only,
-                ).detach()
-
-            x = _pnp_flow_update_gated(
-                pnp,
-                x=x,
-                y=y,
-                degradation=degradation,
-                steps=pnp_steps_inner,
-                lam=lam,
-            ).detach()
-
-        with torch.no_grad():
-            x_y_dist = torch.mean(torch.abs(x - y)).item()
-
+        # --- sigma update ---
         do_sigma = (
-            outer >= int(sigma_freeze_outer_iters)
-            and (outer % max(1, int(sigma_update_every)) == 0)
-            and (x_y_dist > float(x_y_threshold))
+            outer >= sigma_freeze_iters
+            and outer % max(1, sigma_update_every) == 0
         )
 
         if do_sigma:
-            opt.zero_grad(set_to_none=True)
+            opt_sigma.zero_grad(set_to_none=True)
             loss_op = torch.mean((op(x.detach()) - y) ** 2)
-            (loss_op * float(sigma_grad_scale)).backward()
-
-            g = op.log_sigma.grad
-            if g is None or not torch.isfinite(g).all():
-                raise RuntimeError("Invalid log_sigma gradient")
-
-            if clip_sigma_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    op.parameters(), max_norm=float(clip_sigma_grad_norm)
-                )
-
-            opt.step()
+            loss_op.backward()
+            if clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(op.parameters(), clip_grad_norm)
+            opt_sigma.step()
             op.clamp_params_()
-            grad_mag = float(g.detach().abs().mean())
+            grad_mag = (
+                op.log_sigma.grad.abs().item()
+                if op.log_sigma.grad is not None else float("nan")
+            )
         else:
             grad_mag = float("nan")
 
         with torch.no_grad():
-            loss_x = torch.mean((op(x) - y) ** 2).item()
+            loss_val = torch.mean((op(x) - y) ** 2).item()
 
         sigma_hist.append(op.sigma().item())
-        loss_hist.append(loss_x)
-        grad_hist.append(grad_mag)
-        x_y_hist.append(x_y_dist)
+        loss_hist.append(loss_val)
+        grad_sigma_hist.append(grad_mag)
 
-        if (outer % int(print_every) == 0) or (outer == outer_iters - 1):
-            msg = (
-                f"[Step5 {outer:03d}/{outer_iters}] "
-                f"lam={lam:.3f} "
-                f"sigma={op.sigma().item():.4f} "
-                f"loss={loss_x:.4e} "
-                f"|x-y|={x_y_dist:.3e}"
+        if print_every > 0 and (outer % print_every == 0 or outer == outer_iters - 1):
+            status = f"|grad_sigma|={grad_mag:.3e}" if do_sigma else "sigma frozen"
+            print(
+                f"[blind_single {outer:03d}/{outer_iters}]  "
+                f"sigma={op.sigma().item():.4f}  loss={loss_val:.4e}  {status}"
             )
-            if do_sigma:
-                msg += f" |gradσ|={grad_mag:.3e}"
-            else:
-                msg += " |gradσ|=FROZEN"
-            print(msg)
 
-    return dict(
-        x=x,
-        sigma_final=op.sigma().item(),
-        sigma_history=sigma_hist,
-        loss_history=loss_hist,
-        grad_sigma_history=grad_hist,
-        lam_history=lam_hist,
-        x_minus_y_history=x_y_hist,
-    )
+    return {
+        "x": x,
+        "sigma_final": op.sigma().item(),
+        "sigma_history": sigma_hist,
+        "loss_history": loss_hist,
+        "grad_sigma_history": grad_sigma_hist,
+    }
 
 
-# Multi-image shared sigma
-def blind_pnp_flow_step6(
+# ---------------------------------------------------------------------------
+# Layer 3: blind_pnp_flow_multi  (shared sigma, B images)
+#
+# Independent x updates per image (parallel), sigma updated via averaged loss.
+# As B increases, the sigma gradient becomes more informative (Aim 5, 6).
+# ---------------------------------------------------------------------------
+
+def blind_pnp_flow_multi(
     probs: List[BlindGaussianBlurProblem],
     *,
     model,
     device,
     sigma_init: float,
     sigma_max: float,
-    # operator updates 
+    # outer loop
+    outer_iters: int = 60,
+    # x update
+    pnp_steps: int = 50,
+    pnp_lr: float = 0.05,
+    sigma_noise: float = 0.05,
+    gamma_style: str = "1_minus_t",
+    alpha: float = 1.0,
+    num_samples: int = 1,
+    model_type: str = "ot",
+    # sigma update
     operator_lr: float = 1e-2,
     sigma_update_every: int = 1,
-    sigma_freeze_outer_iters: int = 10,
-    # image updates
-    outer_iters: int = 60,
-    image_updates_per_outer: int = 10,
-    # data-only warmup / anchoring
-    warmup_data_steps: int = 20,
-    data_only_between: int = 0,
-    image_lr_data_only: float = 1e-1,
-    # PnP
-    pnp_lr_pnp: float = 0.05,
-    pnp_steps_inner: int = 25,
-    # prior gating
-    lam_max: float = 0.8,
-    lam_ramp_iters: int = 20,
-    # safety
-    clip_sigma_grad_norm: float = 1.0,
-    sigma_grad_scale: float = 0.1,
-    x_y_threshold: float = 1e-3,
-    # debugging
-    print_every: int = 5,
+    sigma_freeze_iters: int = 5,
+    clip_grad_norm: float = 1.0,
+    # debug
+    print_every: int = 10,
 ) -> Dict:
     """
-    Multi-image blind estimation with a shared operator parameter (sigma).
-    Each image has its own latent reconstruction x_i, but sigma is shared and updated
-    using the averaged data term across the batch.
+    Multi-image blind PnP-Flow with shared sigma (Aims 5, 6).
+
+    Each image has its own latent x_i; sigma is shared and updated using
+    the *averaged* data-term loss  (1/B) sum_i || H_sigma(x_i) - y_i ||^2.
+
+    Increased B reduces ambiguity in sigma estimation: different x_i draw
+    different evidence about the shared operator, making the average gradient
+    more informative than any single-image gradient.
     """
     if len(probs) == 0:
-        raise ValueError("probs must be a non-empty list of BlindGaussianBlurProblem")
+        raise ValueError("probs must be non-empty")
 
-    args = SimpleNamespace(
-        method="pnp_flow",
-        model="ot",
-        noise_type="gaussian",
-        lr_pnp=pnp_lr_pnp,
-        steps_pnp=pnp_steps_inner,
-        num_samples=1,
-        gamma_style="alpha_1_minus_t",
-        alpha=1.0,
-        sigma_noise=1.0,
-    )
-    pnp = PNP_FLOW(model=model, device=device, args=args)
+    B = len(probs)
+    ys = [p.y.to(device) for p in probs]
 
     op = LearnableGaussianBlur(
         init_sigma=sigma_init,
         sigma_max=sigma_max,
         padding="reflect",
-    ).to(device)
+    ).to(device=device, dtype=ys[0].dtype)
 
-    opt = torch.optim.Adam(op.parameters(), lr=operator_lr)
+    opt_sigma = torch.optim.Adam(op.parameters(), lr=operator_lr)
 
-    ys = [p.y.to(device) for p in probs]
-    xs = [torch.randn_like(y) for y in ys]
+    xs = [y.clone().detach() for y in ys]
 
-    sigma_hist, loss_hist, grad_hist, lam_hist, x_y_hist = [], [], [], [], []
+    sigma_hist: List[float] = []
+    loss_hist: List[float] = []
+    grad_sigma_hist: List[float] = []
 
-    # warmup: data-only per image (short, avoid driving loss to ~0)
-    for i in range(len(xs)):
-        degradation = _BlindDegradation(op)
-        if warmup_data_steps > 0:
-            xs[i] = _data_only_update(
-                x=xs[i],
+    for outer in range(outer_iters):
+
+        # --- x updates: independent PnP-Flow trajectories, shared sigma ---
+        for i in range(B):
+            xs[i] = _pnp_flow_trajectory(
+                model,
+                x_init=xs[i],
                 y=ys[i],
-                degradation=degradation,
-                steps=warmup_data_steps,
-                image_lr=image_lr_data_only,
+                op=op,
+                sigma_noise=sigma_noise,
+                num_steps=pnp_steps,
+                lr=pnp_lr,
+                gamma_style=gamma_style,
+                alpha=alpha,
+                num_samples=num_samples,
+                model_type=model_type,
             ).detach()
 
-    for outer in range(int(outer_iters)):
-        lam = float(lam_max) * float(min(1.0, outer / max(1, int(lam_ramp_iters))))
-        lam_hist.append(lam)
-
-        # image updates (independent per image, shared operator)
-        for _ in range(int(image_updates_per_outer)):
-            for i in range(len(xs)):
-                degradation = _BlindDegradation(op)
-
-                if data_only_between > 0:
-                    xs[i] = _data_only_update(
-                        x=xs[i],
-                        y=ys[i],
-                        degradation=degradation,
-                        steps=data_only_between,
-                        image_lr=image_lr_data_only,
-                    ).detach()
-
-                xs[i] = _pnp_flow_update_gated(
-                    pnp,
-                    x=xs[i],
-                    y=ys[i],
-                    degradation=degradation,
-                    steps=pnp_steps_inner,
-                    lam=lam,
-                ).detach()
-
-        # identity-basin guard (batch average)
-        with torch.no_grad():
-            x_y_dist = 0.0
-            for i in range(len(xs)):
-                x_y_dist += torch.mean(torch.abs(xs[i] - ys[i])).item()
-            x_y_dist /= float(len(xs))
-
+        # --- sigma update: averaged across all images ---
         do_sigma = (
-            outer >= int(sigma_freeze_outer_iters)
-            and (outer % max(1, int(sigma_update_every)) == 0)
-            and (x_y_dist > float(x_y_threshold))
+            outer >= sigma_freeze_iters
+            and outer % max(1, sigma_update_every) == 0
         )
 
         if do_sigma:
-            opt.zero_grad(set_to_none=True)
-
-            # averaged sigma loss across batch (DATA TERM ONLY)
-            loss_op = 0.0
-            for i in range(len(xs)):
-                loss_op = loss_op + torch.mean((op(xs[i].detach()) - ys[i]) ** 2)
-            loss_op = loss_op / float(len(xs))
-
-            (loss_op * float(sigma_grad_scale)).backward()
-
-            g = op.log_sigma.grad
-            if g is None or not torch.isfinite(g).all():
-                raise RuntimeError("Invalid log_sigma gradient")
-
-            if clip_sigma_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    op.parameters(), max_norm=float(clip_sigma_grad_norm)
-                )
-
-            opt.step()
+            opt_sigma.zero_grad(set_to_none=True)
+            loss_op = sum(
+                torch.mean((op(xs[i].detach()) - ys[i]) ** 2)
+                for i in range(B)
+            ) / float(B)
+            loss_op.backward()
+            if clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(op.parameters(), clip_grad_norm)
+            opt_sigma.step()
             op.clamp_params_()
-            grad_mag = float(g.detach().abs().mean())
+            grad_mag = (
+                op.log_sigma.grad.abs().item()
+                if op.log_sigma.grad is not None else float("nan")
+            )
         else:
             grad_mag = float("nan")
 
-        # averaged data loss for logging
         with torch.no_grad():
-            loss_x = 0.0
-            for i in range(len(xs)):
-                loss_x += torch.mean((op(xs[i]) - ys[i]) ** 2).item()
-            loss_x /= float(len(xs))
+            loss_val = sum(
+                torch.mean((op(xs[i]) - ys[i]) ** 2).item()
+                for i in range(B)
+            ) / float(B)
 
         sigma_hist.append(op.sigma().item())
-        loss_hist.append(loss_x)
-        grad_hist.append(grad_mag)
-        x_y_hist.append(x_y_dist)
+        loss_hist.append(loss_val)
+        grad_sigma_hist.append(grad_mag)
 
-        if (outer % int(print_every) == 0) or (outer == outer_iters - 1):
-            msg = (
-                f"[Step6 B={len(xs)} {outer:03d}/{outer_iters}] "
-                f"lam={lam:.3f} "
-                f"sigma={op.sigma().item():.4f} "
-                f"loss={loss_x:.4e} "
-                f"|x-y|={x_y_dist:.3e}"
-            )
-            if do_sigma:
-                msg += f" |gradσ|={grad_mag:.3e}"
-            else:
-                msg += " |gradσ|=FROZEN"
-            print(msg)
-
-    return dict(
-        xs=xs,
-        sigma_final=op.sigma().item(),
-        sigma_history=sigma_hist,
-        loss_history=loss_hist,
-        grad_sigma_history=grad_hist,
-        lam_history=lam_hist,
-        x_minus_y_history=x_y_hist,
-        batch_size=len(xs),
-    )
-
-
-# Load real images for in-distribution prior behaviour
-def _load_image_as_tensor(path: str, *, size: int, device) -> torch.Tensor:
-    """
-    Loads an RGB image from disk and returns (1,3,H,W) float tensor in [0,1].
-    Uses torchvision/PIL if available.
-    """
-    try:
-        from PIL import Image
-        from torchvision import transforms
-    except Exception as e:
-        raise RuntimeError(
-            "To load real images, install pillow + torchvision, "
-            "or remove IMAGE_DIR to use synthetic random x_gt."
-        ) from e
-
-    img = Image.open(path).convert("RGB")
-    tfm = transforms.Compose([
-        transforms.Resize((size, size)),
-        transforms.ToTensor(),  # [0,1], (C,H,W)
-    ])
-    x = tfm(img).unsqueeze(0).to(device=device)
-    return x
-
-
-def _list_image_files(image_dir: str) -> List[str]:
-    exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-    files = []
-    for name in sorted(os.listdir(image_dir)):
-        p = os.path.join(image_dir, name)
-        if os.path.isfile(p) and os.path.splitext(name.lower())[1] in exts:
-            files.append(p)
-    return files
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    cfg = load_cfg_from_cfg_file("./config/main_config.yaml")
-    cfg.update(load_cfg_from_cfg_file(cfg.root + f"config/dataset_config/{cfg.dataset}.yaml"))
-    cfg.update(load_cfg_from_cfg_file(cfg.root + f"config/method_config/{cfg.method}.yaml"))
-
-    cfg.model = "ot"
-    cfg.method = "pnp_flow"
-    cfg.num_channels = 3
-    cfg.dim_image = 128
-
-    model, state = define_model(cfg)
-    load_model(
-        "ot",
-        model,
-        state,
-        download=False,
-        checkpoint_path="./model/celeba/ot/model_final.pt",
-        dataset=None,
-        device=device,
-    )
-    model.eval()
-
-    image_dir = "./data/celeba/sub-folder"
-
-    sigma_true = 1.2
-    sigma_noise = 0.05
-    sigma_max = 6.0
-    seed0 = 0
-
-    x_gts = []
-
-    if not os.path.isdir(image_dir):
-        raise RuntimeError(
-            f"IMAGE_DIR '{image_dir}' does not exist or is not a directory."
-        )
-
-    files = _list_image_files(image_dir)
-    if len(files) < 8:
-        raise RuntimeError(
-            f"Need at least 8 images in {image_dir}, found {len(files)}."
-        )
-
-    for i in range(8):
-        x_gts.append(
-            _load_image_as_tensor(
-                files[i], size=cfg.dim_image, device=device
-            )
-        )
-
-    print(f"Loaded {len(x_gts)} images from {image_dir}")
-
-
-    batch_sizes = [4, 8] # REMEMBER TO ADD BACK 1 AND 2
-    results = []
-
-    for B in batch_sizes:
-        print("\n" + "=" * 60)
-        print(f"Running Step 6 with batch size B = {B}")
-        print("=" * 60)
-
-        # Fresh problems per run (no leakage)
-        probs = []
-        for i in range(B):
-            probs.append(
-                make_blind_gaussian_blur_problem(
-                    x_gt=x_gts[i],
-                    sigma_true=sigma_true,
-                    sigma_noise=sigma_noise,
-                    sigma_max=sigma_max,
-                    padding="reflect",
-                    seed=seed0 + i,
-                )
+        if print_every > 0 and (outer % print_every == 0 or outer == outer_iters - 1):
+            status = f"|grad_sigma|={grad_mag:.3e}" if do_sigma else "sigma frozen"
+            print(
+                f"[blind_multi B={B} {outer:03d}/{outer_iters}]  "
+                f"sigma={op.sigma().item():.4f}  loss={loss_val:.4e}  {status}"
             )
 
-        out = blind_pnp_flow_step6(
-            probs,
-            model=model,
-            device=device,
-            sigma_init=0.4,
-            sigma_max=sigma_max,
-            operator_lr=1e-2,
-            sigma_update_every=1,
-            sigma_freeze_outer_iters=10,
-            outer_iters=40,
-            image_updates_per_outer=10,
-            warmup_data_steps=20,
-            lam_max=0.8,
-            lam_ramp_iters=20,
-            sigma_grad_scale=0.1,
-            x_y_threshold=1e-3,
-            print_every=5,
-        )
-
-        results.append(
-            {
-                "B": B,
-                "sigma_final": out["sigma_final"],
-            }
-        )
-
-    # Summary table
-    print("\n" + "=" * 60)
-    print("Step 6 Summary: Final sigma vs batch size")
-    print("=" * 60)
-    print(f"{'Batch size':>10} | {'Final sigma':>12}")
-    print("-" * 27)
-    for r in results:
-        print(f"{r['B']:>10} | {r['sigma_final']:>12.4f}")
-    print("=" * 60)
+    return {
+        "xs": xs,
+        "sigma_final": op.sigma().item(),
+        "sigma_history": sigma_hist,
+        "loss_history": loss_hist,
+        "grad_sigma_history": grad_sigma_hist,
+        "batch_size": B,
+    }
