@@ -62,6 +62,26 @@ The naive baseline that updates sigma via per step Adam against
 python -m pnpflow.methods.blind.experiments.a14_baseline
 ```
 
+### 3b. Full failed approaches catalogue
+
+Reproduces every failed sigma estimation approach reported in the thesis,
+each producing the specific numerical values referenced in the text. The
+eleven approaches are A.14 Adam, plain SGD, time restricted updates with
+LR decay, convergence detection, decoupled grid search (warm and fresh
+start), EM with Tweedie estimates, EM with damping (eta=0.1), Morozov
+discrepancy stopping, residual whiteness, and Type II marginal likelihood
+with operator mismatch. Each writes its sigma history, residual history,
+gradient signals, and final error to a JSON file under
+`results/blind/failed_approaches/`.
+
+```
+python -m pnpflow.methods.blind.experiments.failed_approaches
+```
+
+Run a single approach with `--approaches em_damped`. The full list is
+`a14 sgd time_lr convergence grid_warm grid_fresh em_tweedie em_damped
+morozov whiteness type2`.
+
 ### 4. Full blur-SURE evaluation on CelebA
 
 The main contribution. Calibrates the lambda multiplier on synthetic data

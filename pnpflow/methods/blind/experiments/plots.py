@@ -599,6 +599,58 @@ def plot_extended_evaluation(results_dir: str, fig_dir: str) -> None:
     _save(fig, os.path.join(fig_dir, "cross_dataset_sigma_error.png"))
 
 
+def plot_failed_approaches(results_dir: str, fig_dir: str) -> None:
+    """Render a sigma trajectory grid plus a comparative bar chart of final
+    sigma errors for every failed approach with available results."""
+    files = [f for f in os.listdir(results_dir) if f.endswith(".json") and f != "summary.json"]
+    if not files:
+        return
+
+    runs: Dict[str, Dict] = {}
+    for f in files:
+        name = f.replace(".json", "")
+        runs[name] = _load(os.path.join(results_dir, f))
+
+    # Sigma trajectory grid: one panel per approach, average over images
+    n = len(runs)
+    cols = min(4, n)
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(5.5 * cols, 4 * rows), squeeze=False)
+    for ax_idx, (name, run) in enumerate(sorted(runs.items())):
+        ax = axes[ax_idx // cols][ax_idx % cols]
+        per_image = run.get("per_image", [])
+        for r in per_image:
+            history = r.get("sigma_history", [])
+            if history:
+                ax.plot(history, alpha=0.6)
+        ax.axhline(1.5, color="red", linestyle="--", linewidth=1.5, label="sigma_true=1.5")
+        ax.set_xlabel("iteration")
+        ax.set_ylabel("sigma")
+        ax.set_title(name)
+        ax.legend(fontsize=7)
+        ax.grid(alpha=0.3)
+    for k in range(len(runs), rows * cols):
+        axes[k // cols][k % cols].axis("off")
+    plt.suptitle("Failed approaches: sigma trajectories", fontsize=14)
+    plt.tight_layout()
+    _save(fig, os.path.join(fig_dir, "failed_sigma_trajectories.png"))
+
+    # Bar chart of final sigma errors
+    names = sorted(runs.keys())
+    errors = [runs[n].get("sigma_error_mean", float("nan")) for n in names]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(names, errors, color="steelblue", alpha=0.8)
+    ax.set_ylabel("mean sigma error")
+    ax.set_title("Final sigma error by failed approach")
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=9)
+    ax.grid(alpha=0.3, axis="y")
+    for i, v in enumerate(errors):
+        if v == v:
+            ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+    plt.tight_layout()
+    _save(fig, os.path.join(fig_dir, "failed_sigma_errors.png"))
+
+
 def plot_non_blind_ablation(results_dir: str, fig_dir: str) -> None:
     data = _load(os.path.join(results_dir, "ablation_results.json"))
     datasets_present = set()
@@ -649,6 +701,7 @@ def main() -> None:
         ("a14_baseline", plot_a14_baseline),
         ("non_blind_ablation", plot_non_blind_ablation),
         ("trajectory_straightness", plot_trajectory_straightness),
+        ("failed_approaches", plot_failed_approaches),
         ("blur_sure_full", plot_blur_sure_full),
         ("multi_image", plot_multi_image),
         ("extended_evaluation", plot_extended_evaluation),
