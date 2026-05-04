@@ -180,7 +180,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Non blind hyperparameter ablation")
     p.add_argument("--sigma", type=float, default=1.5)
     p.add_argument("--noise-std", type=float, default=0.05)
-    p.add_argument("--max-imgs", type=int, default=10)
+    p.add_argument("--max-imgs", type=int, default=50)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--output-dir", default=None)
     return p.parse_args()

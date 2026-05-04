@@ -196,7 +196,7 @@ def run(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Full blur-SURE evaluation on CelebA")
-    p.add_argument("--num-images", type=int, default=100)
+    p.add_argument("--num-images", type=int, default=250)
     p.add_argument("--n-seeds", type=int, default=3)
     p.add_argument("--pnp-steps", type=int, default=100)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

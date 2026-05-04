@@ -46,7 +46,7 @@ def run(
 ):
     repo_root = find_repo_root()
     model = load_model(repo_root, device)
-    images = load_celeba(repo_root, device, num_images=max(100, max(b_values)), seed=SEED)
+    images = load_celeba(repo_root, device, num_images=max(250, max(b_values)), seed=SEED)
     print(f"Loaded {len(images)} CelebA images")
 
     tt = TimingTracker()

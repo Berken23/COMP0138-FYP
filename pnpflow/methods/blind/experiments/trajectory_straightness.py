@@ -160,7 +160,7 @@ def run(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Trajectory straightness analysis")
-    p.add_argument("--n-imgs", type=int, default=5)
+    p.add_argument("--n-imgs", type=int, default=30)
     p.add_argument("--num-steps", type=int, default=100)
     p.add_argument("--noise-std", type=float, default=0.05)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
