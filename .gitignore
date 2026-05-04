@@ -1,6 +1,3 @@
-results/
-!results/blind/
-!results/blind/**
 *.zip
 *.npy
 *.pth
