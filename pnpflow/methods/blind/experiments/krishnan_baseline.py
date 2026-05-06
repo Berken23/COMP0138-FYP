@@ -11,16 +11,25 @@ is plain L1 rather than the non convex normalised L1 over L2.
 The optimisation alternates between the following two steps until
 convergence.
 
-    1. x update. Solve
-            argmin_x  (1/2) || H_sigma x - y ||^2  +  lambda ( ||D_h x||_1 + ||D_v x||_1 )
-       via ADMM in the FFT domain, with FFT diagonal solves for the linear
-       system and elementwise soft thresholding for the gradient auxiliaries.
+The outer loop is alternating minimisation between two convex sub
+problems. The inner image update is solved by ADMM. The outer loop
+itself is not ADMM, since ADMM is a convex optimisation solver and the
+joint objective in (x, sigma) is non convex.
 
-    2. sigma update. Solve
+    1. x update (image, with sigma fixed).
+            argmin_x  (1/2) || H_sigma x - y ||^2  +  lambda ( ||D_h x||_1 + ||D_v x||_1 )
+       Solved by ADMM in the FFT domain, with FFT diagonal solves for the
+       linear system and elementwise soft thresholding for the gradient
+       auxiliaries.
+
+    2. sigma update (parametric kernel, with x fixed).
             argmin_sigma  || H_sigma x - y ||^2
-       by grid search with parabolic refinement. No reconstruction
-       independence is required because in this baseline x is itself the
-       output of the classical optimisation, not a learned denoiser.
+       Solved in two stages, namely a coarse 1D grid search to identify
+       the basin of attraction (the objective is non convex in sigma when
+       x is held fixed at an arbitrary point), followed by gradient
+       descent on log sigma for refinement. The FFT Gaussian operator is
+       differentiable in sigma through PyTorch autograd, so refinement
+       requires no manual gradient derivation.
 
 A continuation scheme on lambda starts at lambda_init and decreases
 geometrically to lambda_final across outer iterations.
@@ -127,44 +136,124 @@ def _admm_l1_gradient(
     return x.squeeze(0) if squeeze else x
 
 
-def _grid_search_sigma(
+def _grid_init_sigma(
     x: torch.Tensor,
     y: torch.Tensor,
-    sigma_min: float = 0.3,
-    sigma_max: float = 8.0,
-    n_grid: int = 50,
+    sigma_min: float,
+    sigma_max: float,
+    n_grid: int = 30,
 ) -> float:
+    """Coarse grid evaluation of the data fit residual, used to bracket
+    the gradient refinement. Selects the grid point with smallest
+    residual, no parabolic fit (the gradient step does the refinement).
+    """
     grid = torch.linspace(sigma_min, sigma_max, n_grid)
     losses: List[float] = []
     for s in grid:
-        losses.append(float(torch.mean((gaussian_blur_fft(x, float(s)) - y) ** 2).item()))
+        with torch.no_grad():
+            losses.append(float(torch.mean((gaussian_blur_fft(x, float(s)) - y) ** 2).item()))
     j = int(np.argmin(losses))
-    if 0 < j < n_grid - 1:
-        s0, s1, s2 = float(grid[j - 1]), float(grid[j]), float(grid[j + 1])
-        l0, l1, l2 = losses[j - 1], losses[j], losses[j + 1]
-        denom = l0 - 2.0 * l1 + l2
-        if abs(denom) > 1e-12:
-            return s1 - 0.5 * (s2 - s0) * (l2 - l0) / (2.0 * denom)
     return float(grid[j])
+
+
+def _grad_step_sigma(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    sigma_init: float,
+    sigma_min: float = 0.1,
+    sigma_max: float = 8.0,
+    n_steps: int = 50,
+    lr: float = 0.01,
+) -> Tuple[float, float]:
+    """Gradient descent on log sigma to refine the sigma estimate.
+
+    Refinement only, expects the caller to have already bracketed the
+    correct basin via grid search. The FFT Gaussian operator is
+    differentiable in sigma through PyTorch autograd.
+
+    Returns the refined sigma and the magnitude of the final gradient,
+    which serves as a convergence diagnostic.
+    """
+    x = x.detach()
+    y = y.detach()
+    log_sigma = torch.tensor(
+        float(np.log(max(sigma_init, sigma_min))),
+        device=x.device,
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    log_sigma_min = float(np.log(sigma_min))
+    log_sigma_max = float(np.log(sigma_max))
+    opt = torch.optim.Adam([log_sigma], lr=lr)
+    final_grad_mag = 0.0
+    for _ in range(n_steps):
+        opt.zero_grad(set_to_none=True)
+        sigma_t = torch.exp(log_sigma)
+        loss = torch.mean((gaussian_blur_fft(x, sigma_t) - y) ** 2)
+        loss.backward()
+        if log_sigma.grad is not None:
+            final_grad_mag = float(log_sigma.grad.abs().item())
+        opt.step()
+        with torch.no_grad():
+            log_sigma.clamp_(log_sigma_min, log_sigma_max)
+    return float(torch.exp(log_sigma.detach()).item()), final_grad_mag
+
+
+def _update_sigma(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    sigma_min: float = 0.1,
+    sigma_max: float = 8.0,
+    n_grid: int = 30,
+    n_grad_steps: int = 50,
+    grad_lr: float = 0.01,
+) -> Tuple[float, float]:
+    """Combined sigma update: coarse grid init then gradient refinement."""
+    sigma_init = _grid_init_sigma(x, y, sigma_min, sigma_max, n_grid)
+    return _grad_step_sigma(
+        x, y, sigma_init,
+        sigma_min=sigma_min, sigma_max=sigma_max,
+        n_steps=n_grad_steps, lr=grad_lr,
+    )
 
 
 def krishnan_blind_deconv(
     y: torch.Tensor,
     sigma_init: float = 3.0,
-    sigma_min: float = 0.3,
+    sigma_min: float = 0.1,
     sigma_max: float = 8.0,
-    outer_iters: int = 20,
+    outer_iters: int = 5,
     inner_iters: int = 30,
     lambda_init: float = 0.05,
     lambda_final: float = 0.001,
     rho: float = 1.0,
-) -> Tuple[torch.Tensor, float, List[float]]:
-    """Run the alternating Krishnan style blind deconvolution and return the
-    classical reconstruction, the estimated sigma, and the sigma history.
+    sigma_grad_steps: int = 50,
+    sigma_grad_lr: float = 0.01,
+    x_clean: torch.Tensor | None = None,
+    sigma_true: float | None = None,
+) -> Tuple[torch.Tensor, float, Dict[str, List[float]]]:
+    """Run the alternating Krishnan style blind deconvolution.
+
+    Returns the classical reconstruction, the estimated sigma, and a
+    dictionary of per outer iteration convergence diagnostics:
+
+        sigma_history          : sigma value after each outer iteration
+        objective_history      : || H_sigma(x) - y ||^2 after each outer iteration
+        sigma_grad_norm_history: |grad sigma| at the end of the sigma update
+        sigma_error_history    : |sigma_est - sigma_true| (if sigma_true given)
+        x_l2_error_history     : ||x - x_clean||_2 (if x_clean given)
+        psnr_history           : PSNR(x, x_clean) (if x_clean given)
     """
     sigma_current = sigma_init
     x = y.clone().float()
-    sigma_history: List[float] = [sigma_current]
+    history: Dict[str, List[float]] = {
+        "sigma_history": [sigma_current],
+        "objective_history": [],
+        "sigma_grad_norm_history": [],
+        "sigma_error_history": [],
+        "x_l2_error_history": [],
+        "psnr_history": [],
+    }
 
     for outer in range(outer_iters):
         if outer_iters > 1:
@@ -173,10 +262,31 @@ def krishnan_blind_deconv(
             lam = lambda_final
 
         x = _admm_l1_gradient(y, sigma_current, lam, rho, n_iters=inner_iters)
-        sigma_current = _grid_search_sigma(x, y, sigma_min=sigma_min, sigma_max=sigma_max)
-        sigma_history.append(sigma_current)
+        sigma_current, grad_mag = _update_sigma(
+            x, y,
+            sigma_min=sigma_min, sigma_max=sigma_max,
+            n_grad_steps=sigma_grad_steps, grad_lr=sigma_grad_lr,
+        )
 
-    return x, sigma_current, sigma_history
+        # Convergence metrics for this outer iteration.
+        with torch.no_grad():
+            obj = float(torch.mean((gaussian_blur_fft(x, sigma_current) - y) ** 2).item())
+        history["sigma_history"].append(sigma_current)
+        history["objective_history"].append(obj)
+        history["sigma_grad_norm_history"].append(grad_mag)
+        if sigma_true is not None:
+            history["sigma_error_history"].append(abs(sigma_current - sigma_true))
+        if x_clean is not None:
+            with torch.no_grad():
+                x_clamped = x.clamp(-1, 1)
+                l2 = float(torch.linalg.vector_norm(x_clamped - x_clean).item())
+                psnr_postproc = ((x_clamped + 1) / 2 - (x_clean + 1) / 2).clamp(-1, 1)
+                mse = float(torch.mean(psnr_postproc ** 2).item())
+                psnr = float("inf") if mse < 1e-12 else 10.0 * np.log10(1.0 / mse)
+            history["x_l2_error_history"].append(l2)
+            history["psnr_history"].append(psnr)
+
+    return x, sigma_current, history
 
 
 # ---------------------------------------------------------------------------
@@ -217,8 +327,12 @@ def run(
         y = gaussian_blur_fft(x_gt, sigma_true) + torch.randn_like(x_gt) * noise_std
 
         with tt.track("krishnan_full"):
-            x_classical, sigma_est, sigma_hist = krishnan_blind_deconv(
-                y, outer_iters=outer_iters, inner_iters=inner_iters,
+            x_classical, sigma_est, history = krishnan_blind_deconv(
+                y,
+                outer_iters=outer_iters,
+                inner_iters=inner_iters,
+                x_clean=x_gt,
+                sigma_true=sigma_true,
             )
         x_classical = x_classical.clamp(-1, 1)
         m_classical = evaluate(x_classical, x_gt)
@@ -244,7 +358,15 @@ def run(
         else:
             m_oracle = None
 
-        if idx < 8:
+        # Per dataset cap on qualitative count: 30 for CelebA, 18 for BSD68,
+        # 12 for Set12 (full set since it only has 12 images).
+        if dataset == "CelebA":
+            qual_limit = 30
+        elif dataset == "BSD68":
+            qual_limit = 18
+        else:
+            qual_limit = 12
+        if idx < qual_limit:
             save_image(postprocess(x_gt), os.path.join(qual_dir, f"{idx:04d}_clean.png"))
             save_image(postprocess(y), os.path.join(qual_dir, f"{idx:04d}_observed.png"))
             save_image(postprocess(x_classical), os.path.join(qual_dir, f"{idx:04d}_krishnan.png"))
@@ -255,7 +377,7 @@ def run(
             "index": idx,
             "sigma_est": sigma_est,
             "sigma_error": abs(sigma_est - sigma_true),
-            "sigma_history": sigma_hist,
+            "convergence": history,
             "psnr_classical": m_classical["psnr"],
             "ssim_classical": m_classical["ssim"],
             "lpips_classical": m_classical["lpips"],
@@ -344,7 +466,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sigma", type=float, default=1.5)
     p.add_argument("--noise-std", type=float, default=0.05)
     p.add_argument("--num-images", type=int, default=50)
-    p.add_argument("--outer-iters", type=int, default=20)
+    p.add_argument("--outer-iters", type=int, default=5)
     p.add_argument("--inner-iters", type=int, default=30)
     p.add_argument("--pnp-steps", type=int, default=100)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

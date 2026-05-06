@@ -1,11 +1,13 @@
-"""A.14 baseline experiment.
+"""Naive joint estimation experiment.
 
-Reproduces the failed joint estimation baseline from the thesis. At every
-PnP-Flow step the operator parameter sigma is updated via Adam against
-||y - H_sigma(x)||^2. This is the approach the thesis diagnoses as
-structurally biased due to the over sharpening of the denoiser output.
+Reproduces the per step Adam scheme described in the appendix of Martin
+et al.'s PnP-Flow paper (the A.14 method). At every PnP-Flow step the
+operator parameter sigma is updated via Adam against ||y - H_sigma(x)||^2,
+producing a joint estimate of the image and the blur parameter. This is
+the naive joint approach which the thesis diagnoses as structurally
+biased due to the over sharpening of the denoiser output.
 
-Outputs are written to results/blind/a14_baseline/.
+Outputs are written to results/blind/naive_joint_estimation/.
 """
 from __future__ import annotations
 
@@ -55,6 +57,9 @@ def run(
         y = gaussian_blur_fft(x_gt, sigma_true) + torch.randn_like(x_gt) * noise_std
 
         sigma_hist_outer = []
+        objective_hist_outer = []
+        x_l2_error_hist_outer = []
+        sigma_error_hist_outer = []
         x = y.clone()
 
         with tt.track("a14_full"):
@@ -68,6 +73,12 @@ def run(
                     num_steps=pnp_steps,
                 )
                 sigma_hist_outer.append(sigma_final)
+                with torch.no_grad():
+                    obj = float(torch.mean((gaussian_blur_fft(x, sigma_final) - y) ** 2).item())
+                    l2 = float(torch.linalg.vector_norm(x.clamp(-1, 1) - x_gt).item())
+                objective_hist_outer.append(obj)
+                x_l2_error_hist_outer.append(l2)
+                sigma_error_hist_outer.append(abs(sigma_final - sigma_true))
 
         m = evaluate(x, x_gt)
         records.append({
@@ -75,6 +86,9 @@ def run(
             "sigma_final": sigma_final,
             "sigma_error": abs(sigma_final - sigma_true),
             "sigma_history_outer": sigma_hist_outer,
+            "objective_history": objective_hist_outer,
+            "x_l2_error_history": x_l2_error_hist_outer,
+            "sigma_error_history": sigma_error_hist_outer,
             "psnr": m["psnr"],
             "ssim": m["ssim"],
             "lpips": m["lpips"],
@@ -85,7 +99,7 @@ def run(
         )
 
     summary = {
-        "experiment": "a14_baseline",
+        "experiment": "naive_joint_estimation",
         "sigma_true": sigma_true,
         "sigma_init": sigma_init,
         "noise_std": noise_std,
@@ -148,7 +162,7 @@ def run(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="A.14 baseline (failed joint estimation)")
+    p = argparse.ArgumentParser(description="Naive joint estimation (per step Adam)")
     p.add_argument("--num-images", type=int, default=10)
     p.add_argument("--sigma", type=float, default=1.5)
     p.add_argument("--sigma-init", type=float, default=3.0)
@@ -163,7 +177,7 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    output_dir = args.output_dir or os.path.join(find_repo_root(), "results", "blind", "a14_baseline")
+    output_dir = args.output_dir or os.path.join(find_repo_root(), "results", "blind", "naive_joint_estimation")
     run(
         num_images=args.num_images,
         sigma_true=args.sigma,

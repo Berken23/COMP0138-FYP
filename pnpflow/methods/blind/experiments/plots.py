@@ -38,7 +38,7 @@ def _save(fig, path: str) -> None:
     print(f"  wrote {path}")
 
 
-def plot_a14_baseline(results_dir: str, fig_dir: str) -> None:
+def plot_naive_joint_estimation(results_dir: str, fig_dir: str) -> None:
     per_image = _load(os.path.join(results_dir, "per_image.json"))
     summary = _load(os.path.join(results_dir, "summary.json"))
     sigma_true = summary["sigma_true"]
@@ -51,7 +51,7 @@ def plot_a14_baseline(results_dir: str, fig_dir: str) -> None:
     ax.axhline(sigma_true, color="red", linestyle="--", linewidth=2, label=f"sigma_true={sigma_true}")
     ax.set_xlabel("Outer iteration")
     ax.set_ylabel("sigma")
-    ax.set_title("Sigma trajectory (A.14)")
+    ax.set_title("Sigma trajectory (naive joint estimation)")
     ax.legend(fontsize=6)
     ax.grid(alpha=0.3)
 
@@ -73,9 +73,9 @@ def plot_a14_baseline(results_dir: str, fig_dir: str) -> None:
     ax.set_title("PSNR per image")
     ax.legend()
 
-    plt.suptitle("A.14 per step Adam baseline", fontsize=13)
+    plt.suptitle("Naive joint estimation (A.14 per step Adam)", fontsize=13)
     plt.tight_layout()
-    _save(fig, os.path.join(fig_dir, "a14_baseline.png"))
+    _save(fig, os.path.join(fig_dir, "naive_joint_estimation.png"))
 
     # Iteration progression grid
     prog_meta_path = os.path.join(results_dir, "iteration_progression.json")
@@ -107,11 +107,11 @@ def plot_a14_baseline(results_dir: str, fig_dir: str) -> None:
                 axes[2 + j].set_title(f"iter {e['outer']}\ns={e['sigma']:.2f}", fontsize=7)
                 axes[2 + j].axis("off")
             plt.suptitle(
-                f"Image {img_idx}: A.14 progression (sigma drifts {summary['sigma_init']}->{entries[-1]['sigma']:.2f})",
+                f"Image {img_idx}: naive joint estimation progression (sigma drifts {summary['sigma_init']}->{entries[-1]['sigma']:.2f})",
                 fontsize=10,
             )
             plt.tight_layout()
-            _save(fig, os.path.join(fig_dir, f"a14_progression_img{img_idx}.png"))
+            _save(fig, os.path.join(fig_dir, f"naive_joint_progression_img{img_idx}.png"))
 
 
 def plot_trajectory_straightness(results_dir: str, fig_dir: str) -> None:
@@ -599,6 +599,168 @@ def plot_extended_evaluation(results_dir: str, fig_dir: str) -> None:
     _save(fig, os.path.join(fig_dir, "cross_dataset_sigma_error.png"))
 
 
+def plot_convergence(results_root: str, fig_dir: str) -> None:
+    """Render convergence diagnostics for the Krishnan baseline, naive
+    joint estimation, and PnP-Flow reconstruction. Shows L2 error,
+    objective, sigma error, and where applicable gradient norm versus
+    iteration on semilog axes.
+    """
+    panels: List[Dict] = []
+
+    naive_per_image = os.path.join(results_root, "naive_joint_estimation", "per_image.json")
+    if os.path.exists(naive_per_image):
+        records = _load(naive_per_image)
+        if records and "objective_history" in records[0]:
+            panels.append({
+                "name": "Naive joint estimation",
+                "records": records,
+                "xlabel": "outer iteration",
+            })
+
+    krishnan_glob = os.path.join(results_root, "krishnan_baseline")
+    if os.path.isdir(krishnan_glob):
+        for dataset in os.listdir(krishnan_glob):
+            ds_dir = os.path.join(krishnan_glob, dataset)
+            if not os.path.isdir(ds_dir):
+                continue
+            for cfg in os.listdir(ds_dir):
+                cfg_dir = os.path.join(ds_dir, cfg)
+                per_image_path = os.path.join(cfg_dir, "per_image.json")
+                if not os.path.exists(per_image_path):
+                    continue
+                records = _load(per_image_path)
+                if not records or "convergence" not in records[0]:
+                    continue
+                # Flatten to the structure expected by the plotter below.
+                flat = []
+                for r in records:
+                    h = r["convergence"]
+                    flat.append({
+                        "objective_history": h.get("objective_history", []),
+                        "x_l2_error_history": h.get("x_l2_error_history", []),
+                        "sigma_error_history": h.get("sigma_error_history", []),
+                        "sigma_grad_norm_history": h.get("sigma_grad_norm_history", []),
+                    })
+                panels.append({
+                    "name": f"Krishnan {dataset} {cfg}",
+                    "records": flat,
+                    "xlabel": "outer iteration",
+                })
+
+    if not panels:
+        return
+
+    for panel in panels:
+        records = panel["records"]
+        # Average across images.
+        max_len = max(
+            len(r.get("objective_history", [])) for r in records if r.get("objective_history")
+        )
+        if max_len == 0:
+            continue
+
+        def avg_curve(field: str):
+            curves = [r.get(field, []) for r in records if r.get(field)]
+            if not curves:
+                return None
+            curves = [c[:max_len] + [c[-1]] * (max_len - len(c)) for c in curves]
+            return np.mean(np.array(curves), axis=0)
+
+        obj = avg_curve("objective_history")
+        l2 = avg_curve("x_l2_error_history")
+        sig_err = avg_curve("sigma_error_history")
+        grad_n = avg_curve("sigma_grad_norm_history")
+
+        n_subpanels = sum(c is not None for c in [obj, l2, sig_err, grad_n])
+        fig, axes = plt.subplots(1, n_subpanels, figsize=(5 * n_subpanels, 4), squeeze=False)
+        col = 0
+        if obj is not None:
+            ax = axes[0][col]
+            ax.semilogy(range(1, len(obj) + 1), obj, "b-o", markersize=4)
+            ax.set_xlabel(panel["xlabel"])
+            ax.set_ylabel("objective ||H_sigma(x) - y||^2 (log scale)")
+            ax.set_title("Objective convergence")
+            ax.grid(alpha=0.3, which="both")
+            col += 1
+        if l2 is not None:
+            ax = axes[0][col]
+            ax.semilogy(range(1, len(l2) + 1), l2, "g-s", markersize=4)
+            ax.set_xlabel(panel["xlabel"])
+            ax.set_ylabel("||x - x_clean||_2 (log scale)")
+            ax.set_title("Image error vs ground truth")
+            ax.grid(alpha=0.3, which="both")
+            col += 1
+        if sig_err is not None:
+            ax = axes[0][col]
+            sig_err_safe = np.maximum(sig_err, 1e-6)
+            ax.semilogy(range(1, len(sig_err) + 1), sig_err_safe, "r-^", markersize=4)
+            ax.set_xlabel(panel["xlabel"])
+            ax.set_ylabel("|sigma_est - sigma_true| (log scale)")
+            ax.set_title("Sigma error vs ground truth")
+            ax.grid(alpha=0.3, which="both")
+            col += 1
+        if grad_n is not None:
+            ax = axes[0][col]
+            grad_safe = np.maximum(grad_n, 1e-12)
+            ax.semilogy(range(1, len(grad_n) + 1), grad_safe, "m-d", markersize=4)
+            ax.set_xlabel(panel["xlabel"])
+            ax.set_ylabel("|grad sigma| (log scale)")
+            ax.set_title("Sigma gradient norm")
+            ax.grid(alpha=0.3, which="both")
+            col += 1
+        plt.suptitle(panel["name"], fontsize=13)
+        plt.tight_layout()
+        safe_name = panel["name"].replace(" ", "_").replace("/", "_")
+        _save(fig, os.path.join(fig_dir, f"convergence_{safe_name}.png"))
+
+    # Also render PnP-Flow reconstruction trajectory convergence if present.
+    bsf_conv_path = os.path.join(results_root, "blur_sure_full", "convergence.json")
+    if os.path.exists(bsf_conv_path):
+        conv = _load(bsf_conv_path)
+        if conv:
+            blind = [c for c in conv if c.get("kind") == "blind"]
+            oracle = [c for c in conv if c.get("kind") == "oracle"]
+
+            def avg_history(items: List[Dict], field: str):
+                if not items:
+                    return None
+                curves = [it["history"].get(field, []) for it in items if it.get("history")]
+                if not curves:
+                    return None
+                m = max(len(c) for c in curves)
+                curves = [c + [c[-1]] * (m - len(c)) for c in curves]
+                return np.mean(np.array(curves), axis=0)
+
+            fields = [
+                ("psnr_history", "PSNR (dB)", "linear"),
+                ("x_l2_error_history", "||x_t - x_clean||_2", "log"),
+                ("objective_history", "||H_sigma(x_t) - y||^2", "log"),
+            ]
+            fig, axes = plt.subplots(1, 3, figsize=(16, 4), squeeze=False)
+            for ci, (field, ylabel, scale) in enumerate(fields):
+                ax = axes[0][ci]
+                blind_curve = avg_history(blind, field)
+                oracle_curve = avg_history(oracle, field)
+                if blind_curve is not None:
+                    if scale == "log":
+                        ax.semilogy(range(len(blind_curve)), np.maximum(blind_curve, 1e-12), "b-", label="blind (blur-SURE sigma)")
+                    else:
+                        ax.plot(range(len(blind_curve)), blind_curve, "b-", label="blind (blur-SURE sigma)")
+                if oracle_curve is not None:
+                    if scale == "log":
+                        ax.semilogy(range(len(oracle_curve)), np.maximum(oracle_curve, 1e-12), "r--", label="oracle (true sigma)")
+                    else:
+                        ax.plot(range(len(oracle_curve)), oracle_curve, "r--", label="oracle (true sigma)")
+                ax.set_xlabel("PnP-Flow trajectory step")
+                ax.set_ylabel(ylabel)
+                ax.set_title(field.replace("_history", ""))
+                ax.legend(fontsize=8)
+                ax.grid(alpha=0.3, which="both")
+            plt.suptitle("PnP-Flow reconstruction convergence (blur-SURE sigma vs oracle)", fontsize=13)
+            plt.tight_layout()
+            _save(fig, os.path.join(fig_dir, "convergence_pnp_flow.png"))
+
+
 def plot_failed_approaches(results_dir: str, fig_dir: str) -> None:
     """Render a sigma trajectory grid plus a comparative bar chart of final
     sigma errors for every failed approach with available results."""
@@ -697,8 +859,11 @@ def main() -> None:
     fig_dir = args.fig_dir or os.path.join(results_root, "figures")
     _ensure_dir(fig_dir)
 
+    # Convergence plots aggregate across multiple result directories.
+    plot_convergence(results_root, fig_dir)
+
     plotters = [
-        ("a14_baseline", plot_a14_baseline),
+        ("naive_joint_estimation", plot_naive_joint_estimation),
         ("non_blind_ablation", plot_non_blind_ablation),
         ("trajectory_straightness", plot_trajectory_straightness),
         ("failed_approaches", plot_failed_approaches),

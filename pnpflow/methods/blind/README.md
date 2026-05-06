@@ -53,13 +53,14 @@ values, and gamma schedules.
 python -m pnpflow.methods.blind.experiments.trajectory_straightness
 ```
 
-### 3. A.14 baseline (failed joint estimation)
+### 3. Naive joint estimation (per step Adam from Martin et al. appendix A.14)
 
-The naive baseline that updates sigma via per step Adam against
-||y - H_sigma(x)||^2. Demonstrates the over sharpening bias.
+The naive scheme that updates sigma via per step Adam against
+||y - H_sigma(x)||^2. Demonstrates the over sharpening bias that
+motivates the proposed pipeline.
 
 ```
-python -m pnpflow.methods.blind.experiments.a14_baseline
+python -m pnpflow.methods.blind.experiments.naive_joint_estimation
 ```
 
 ### 3b. Full failed approaches catalogue

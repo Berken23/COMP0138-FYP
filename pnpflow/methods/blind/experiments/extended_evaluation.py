@@ -35,7 +35,9 @@ from ..sigma_estimation import estimate_sigma_blur_sure
 
 QUAL_SIGMA = 1.5
 QUAL_NOISE = 0.05
-QUAL_NUM_IMAGES = 8
+# 18 for BSD68, capped at full set size (12) for Set12.
+QUAL_NUM_IMAGES_BY_DATASET = {"BSD68": 18, "Set12": 12}
+QUAL_NUM_IMAGES_DEFAULT = 18
 
 
 def run(
@@ -104,7 +106,8 @@ def run(
                     )
                     m_orc = evaluate(x_orc, x_gt)
 
-                    if is_qual_cfg and idx < QUAL_NUM_IMAGES:
+                    qual_limit = QUAL_NUM_IMAGES_BY_DATASET.get(dname, QUAL_NUM_IMAGES_DEFAULT)
+                    if is_qual_cfg and idx < qual_limit:
                         save_image(postprocess(x_gt), os.path.join(qual_dir, f"{idx:04d}_clean.png"))
                         save_image(postprocess(y), os.path.join(qual_dir, f"{idx:04d}_observed.png"))
                         save_image(postprocess(first_x_rec), os.path.join(qual_dir, f"{idx:04d}_blind.png"))

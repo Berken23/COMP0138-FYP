@@ -31,14 +31,15 @@ from .._helpers import (
 from ..data import load_celeba
 from ..evaluation import evaluate, postprocess
 from ..forward import gaussian_blur_fft
-from ..reconstruction import pnp_flow_reconstruct
+from ..reconstruction import pnp_flow_reconstruct, pnp_flow_reconstruct_tracked
 from ..sigma_estimation import estimate_sigma_blur_sure
 
 
 QUAL_SIGMA = 1.5
 QUAL_NOISE = 0.05
-QUAL_NUM_IMAGES = 8
+QUAL_NUM_IMAGES = 30
 QUAL_NUM_SURE_CURVES = 3
+CONVERGENCE_NUM_IMAGES = 8
 
 
 def calibrate_lambda(noise_levels: List[float], img_size: int, device: str) -> Dict[float, float]:
@@ -100,6 +101,7 @@ def run(
     qual_dir = os.path.join(output_dir, "qualitative")
     os.makedirs(qual_dir, exist_ok=True)
     sure_curves_dump: List[Dict] = []
+    convergence_dump: List[Dict] = []
 
     for sigma_true in SIGMA_VALUES:
         for noise_std in NOISE_LEVELS:
@@ -129,12 +131,25 @@ def run(
 
                 seed_metrics = {"psnr": [], "ssim": [], "lpips": []}
                 first_x_rec = None
+                track_convergence = is_qual_cfg and idx < CONVERGENCE_NUM_IMAGES
                 for so in range(n_seeds):
                     torch.manual_seed(SEED + idx * 100 + so)
                     with tt.track("reconstruction"):
-                        x_rec = pnp_flow_reconstruct(
-                            model, y=y, sigma_blur=sigma_est, num_steps=pnp_steps,
-                        )
+                        if track_convergence and so == 0:
+                            x_rec, conv_hist = pnp_flow_reconstruct_tracked(
+                                model, y=y, sigma_blur=sigma_est,
+                                x_clean=x_gt, num_steps=pnp_steps,
+                            )
+                            convergence_dump.append({
+                                "index": idx,
+                                "sigma_used": sigma_est,
+                                "kind": "blind",
+                                "history": conv_hist,
+                            })
+                        else:
+                            x_rec = pnp_flow_reconstruct(
+                                model, y=y, sigma_blur=sigma_est, num_steps=pnp_steps,
+                            )
                     m = evaluate(x_rec, x_gt)
                     for k in seed_metrics:
                         seed_metrics[k].append(m[k])
@@ -142,9 +157,21 @@ def run(
                         first_x_rec = x_rec
 
                 torch.manual_seed(SEED + idx * 100)
-                x_oracle = pnp_flow_reconstruct(
-                    model, y=y, sigma_blur=sigma_true, num_steps=pnp_steps,
-                )
+                if track_convergence:
+                    x_oracle, oracle_conv = pnp_flow_reconstruct_tracked(
+                        model, y=y, sigma_blur=sigma_true,
+                        x_clean=x_gt, num_steps=pnp_steps,
+                    )
+                    convergence_dump.append({
+                        "index": idx,
+                        "sigma_used": sigma_true,
+                        "kind": "oracle",
+                        "history": oracle_conv,
+                    })
+                else:
+                    x_oracle = pnp_flow_reconstruct(
+                        model, y=y, sigma_blur=sigma_true, num_steps=pnp_steps,
+                    )
                 m_oracle = evaluate(x_oracle, x_gt)
 
                 if is_qual_cfg and idx < QUAL_NUM_IMAGES:
@@ -188,7 +215,8 @@ def run(
 
     save_json(os.path.join(output_dir, "results.json"), all_results)
     save_json(os.path.join(output_dir, "sure_curves.json"), sure_curves_dump)
-    print(f"\nWrote {output_dir}/results.json and sure_curves.json")
+    save_json(os.path.join(output_dir, "convergence.json"), convergence_dump)
+    print(f"\nWrote {output_dir}/results.json, sure_curves.json, convergence.json")
     print(f"Qualitative images at {qual_dir}")
     print(tt.summary())
     return all_results
