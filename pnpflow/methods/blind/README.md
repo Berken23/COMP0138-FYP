@@ -114,6 +114,26 @@ three metrics, oracle gap reported.
 python -m pnpflow.methods.blind.experiments.extended_evaluation
 ```
 
+### 6b. Krishnan classical baseline
+
+External baseline based on the principles of Krishnan, Tay, and Fergus (2011).
+The original method is adapted here to the parametric Gaussian setting and uses
+plain L1 image gradient sparsity rather than the original normalised L1 over L2
+prior. Alternates a Krishnan style ADMM image update with grid search on sigma.
+Produces both a classical reconstruction and a PnP-Flow reconstruction using
+the estimated sigma so the failure mode (estimation versus prior) can be
+isolated. Defaults run on 50 CelebA images at sigma=1.5 and eta=0.05.
+
+```
+python -m pnpflow.methods.blind.experiments.krishnan_baseline
+```
+
+To expand to other configurations:
+
+```
+python -m pnpflow.methods.blind.experiments.krishnan_baseline --dataset BSD68 --sigma 3.0
+```
+
 ### 7. Render every paper figure from the JSON outputs
 
 Loads the JSON results from each experiment directory and produces the
