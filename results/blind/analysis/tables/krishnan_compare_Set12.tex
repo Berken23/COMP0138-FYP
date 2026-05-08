@@ -1,0 +1,18 @@
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{cccccccc}
+\toprule
+$\sigma$ & $\eta$ & blur-SURE err & Krishnan err & blur-SURE gap & Krishnan PnP gap & Krishnan classical PSNR & oracle PSNR \\
+\midrule
+0.5 & 0.10 & 0.3391 & 0.5431 & +0.54 & +1.22 & 22.70 & 26.53 \\
+1.0 & 0.10 & 0.0975 & 0.3034 & +0.13 & +0.25 & 23.99 & 24.45 \\
+1.5 & 0.10 & 0.1643 & 0.2703 & +0.01 & -0.03 & 23.97 & 22.88 \\
+2.0 & 0.10 & 0.4347 & 0.7535 & -0.03 & -0.02 & 22.66 & 21.74 \\
+3.0 & 0.10 & 1.0131 & 1.9755 & -0.06 & +0.08 & 20.25 & 20.17 \\
+4.0 & 0.10 & 1.6339 & 3.3693 & +0.03 & +0.23 & 18.73 & 19.29 \\
+\bottomrule
+\end{tabular}
+\caption{Set12: blur-SURE versus Krishnan classical baseline. Layout legacy_eta_only.}
+\label{tab:krishnan_compare_set12}
+\end{table}

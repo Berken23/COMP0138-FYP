@@ -1,0 +1,18 @@
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{cccccccc}
+\toprule
+$\sigma$ & $\eta$ & blur-SURE err & Krishnan err & blur-SURE gap & Krishnan PnP gap & Krishnan classical PSNR & oracle PSNR \\
+\midrule
+0.5 & 0.10 & 0.4483 & 0.6698 & +0.41 & +0.99 & 23.75 & 29.30 \\
+1.0 & 0.10 & 0.1921 & 0.3756 & +0.07 & +0.30 & 24.88 & 27.93 \\
+1.5 & 0.10 & 0.1066 & 0.2360 & +0.03 & +0.05 & 25.29 & 26.67 \\
+2.0 & 0.10 & 0.3748 & 0.4350 & +0.16 & +0.14 & 24.69 & 25.61 \\
+3.0 & 0.10 & 1.0279 & 1.3176 & +0.59 & +0.68 & 22.59 & 23.98 \\
+4.0 & 0.10 & 1.7444 & 2.6206 & +0.99 & +1.47 & 20.62 & 22.79 \\
+\bottomrule
+\end{tabular}
+\caption{CelebA: blur-SURE versus Krishnan classical baseline. Layout legacy_eta_only.}
+\label{tab:krishnan_compare_celeba}
+\end{table}

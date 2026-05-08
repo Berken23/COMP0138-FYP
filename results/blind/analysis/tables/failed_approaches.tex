@@ -1,0 +1,24 @@
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Approach & Final $\sigma$ error & Best $\sigma$ error & PSNR (dB) \\
+\midrule
+\texttt{a14} & 0.5628 & 0.0219 & 25.88 \\
+\texttt{convergence} & 0.5482 & 0.0219 & -- \\
+\texttt{em_damped} & 0.2928 & 0.0079 & 26.36 \\
+\texttt{em_tweedie} & 0.4194 & 0.1374 & 26.27 \\
+\texttt{grid_fresh} & 0.6394 & 0.1214 & -- \\
+\texttt{grid_warm} & 0.6394 & 0.1214 & -- \\
+\texttt{morozov} & 0.2468 & 0.0079 & 26.39 \\
+\texttt{sgd} & 1.4320 & 1.4320 & 24.68 \\
+\texttt{time_lr_aggressive} & 1.3672 & 1.3584 & 24.80 \\
+\texttt{time_lr_moderate} & 0.9868 & 0.9456 & 25.37 \\
+\texttt{type2} & 3.5000 & 1.5000 & -- \\
+\texttt{whiteness} & 1.4000 & 0.1034 & -- \\
+\bottomrule
+\end{tabular}
+\caption{Failed approaches summary at $\sigma_{\text{true}}=1.5$, $\eta=0.05$. Best $\sigma$ error is the closest the method came to the true value during its iterations.}
+\label{tab:failed_approaches}
+\end{table}

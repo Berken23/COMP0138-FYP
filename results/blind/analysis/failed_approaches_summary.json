@@ -1,0 +1,98 @@
+[
+  {
+    "approach": "a14",
+    "sigma_error_mean": 0.5628117680549621,
+    "sigma_error_std": 0.16162291884823,
+    "best_sigma_error_mean": 0.021883821487426756,
+    "psnr_mean": 25.87735340865289,
+    "n_images": 10
+  },
+  {
+    "approach": "convergence",
+    "sigma_error_mean": 0.5481685042381287,
+    "sigma_error_std": 0.15820205924511604,
+    "best_sigma_error_mean": 0.021883821487426756,
+    "psnr_mean": null,
+    "n_images": 10
+  },
+  {
+    "approach": "em_damped",
+    "sigma_error_mean": 0.29283985815938796,
+    "sigma_error_std": 0.0688474823254599,
+    "best_sigma_error_mean": 0.007858005134113544,
+    "psnr_mean": 26.35938892167159,
+    "n_images": 10
+  },
+  {
+    "approach": "em_tweedie",
+    "sigma_error_mean": 0.4194387613790894,
+    "sigma_error_std": 0.07348326775079286,
+    "best_sigma_error_mean": 0.1373895116444168,
+    "psnr_mean": 26.273284296090264,
+    "n_images": 10
+  },
+  {
+    "approach": "grid_fresh",
+    "sigma_error_mean": 0.6393755425207578,
+    "sigma_error_std": 0.11161617866914288,
+    "best_sigma_error_mean": 0.12138134528346063,
+    "psnr_mean": null,
+    "n_images": 10
+  },
+  {
+    "approach": "grid_warm",
+    "sigma_error_mean": 0.6393755425207578,
+    "sigma_error_std": 0.11161617866914288,
+    "best_sigma_error_mean": 0.12138134528346063,
+    "psnr_mean": null,
+    "n_images": 10
+  },
+  {
+    "approach": "morozov",
+    "sigma_error_mean": 0.24676467307025157,
+    "sigma_error_std": 0.07095128861846034,
+    "best_sigma_error_mean": 0.007858005134113544,
+    "psnr_mean": 26.387747796236376,
+    "n_images": 10
+  },
+  {
+    "approach": "sgd",
+    "sigma_error_mean": 1.4319809675216675,
+    "sigma_error_std": 0.02650092911037084,
+    "best_sigma_error_mean": 1.4319809675216675,
+    "psnr_mean": 24.67827339681151,
+    "n_images": 10
+  },
+  {
+    "approach": "time_lr_aggressive",
+    "sigma_error_mean": 1.3671828746795653,
+    "sigma_error_std": 0.10840562335646574,
+    "best_sigma_error_mean": 1.3583687782287597,
+    "psnr_mean": 24.79920269747958,
+    "n_images": 10
+  },
+  {
+    "approach": "time_lr_moderate",
+    "sigma_error_mean": 0.9867504954338073,
+    "sigma_error_std": 0.43021834894466443,
+    "best_sigma_error_mean": 0.9456146597862244,
+    "psnr_mean": 25.371063399611977,
+    "n_images": 10
+  },
+  {
+    "approach": "type2",
+    "sigma_error_mean": 3.5,
+    "sigma_error_std": 0.0,
+    "best_sigma_error_mean": 1.5,
+    "psnr_mean": null,
+    "n_images": 10
+  },
+  {
+    "approach": "whiteness",
+    "sigma_error_mean": 1.4,
+    "sigma_error_std": 0.0,
+    "best_sigma_error_mean": 0.1033730678430677,
+    "psnr_mean": null,
+    "n_images": 10
+  }
+]

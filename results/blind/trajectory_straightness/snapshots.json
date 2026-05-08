@@ -1,0 +1,110 @@
+[
+  {
+    "dataset": "CelebA",
+    "k": 0,
+    "t": 0.0,
+    "deviation": 0.0
+  },
+  {
+    "dataset": "CelebA",
+    "k": 10,
+    "t": 0.09999999999999999,
+    "deviation": 0.28493988513946533
+  },
+  {
+    "dataset": "CelebA",
+    "k": 25,
+    "t": 0.25,
+    "deviation": 0.18119581043720245
+  },
+  {
+    "dataset": "CelebA",
+    "k": 50,
+    "t": 0.5,
+    "deviation": 0.11771069467067719
+  },
+  {
+    "dataset": "CelebA",
+    "k": 75,
+    "t": 0.75,
+    "deviation": 0.06389551609754562
+  },
+  {
+    "dataset": "CelebA",
+    "k": 100,
+    "t": 1.0,
+    "deviation": 0.0
+  },
+  {
+    "dataset": "BSD68",
+    "k": 0,
+    "t": 0.0,
+    "deviation": 0.0
+  },
+  {
+    "dataset": "BSD68",
+    "k": 10,
+    "t": 0.09999999999999999,
+    "deviation": 0.22066548466682434
+  },
+  {
+    "dataset": "BSD68",
+    "k": 25,
+    "t": 0.25,
+    "deviation": 0.15770971775054932
+  },
+  {
+    "dataset": "BSD68",
+    "k": 50,
+    "t": 0.5,
+    "deviation": 0.07170421630144119
+  },
+  {
+    "dataset": "BSD68",
+    "k": 75,
+    "t": 0.75,
+    "deviation": 0.04357016086578369
+  },
+  {
+    "dataset": "BSD68",
+    "k": 100,
+    "t": 1.0,
+    "deviation": 0.0
+  },
+  {
+    "dataset": "Set12",
+    "k": 0,
+    "t": 0.0,
+    "deviation": 0.0
+  },
+  {
+    "dataset": "Set12",
+    "k": 10,
+    "t": 0.09999999999999999,
+    "deviation": 0.2965191602706909
+  },
+  {
+    "dataset": "Set12",
+    "k": 25,
+    "t": 0.25,
+    "deviation": 0.17224618792533875
+  },
+  {
+    "dataset": "Set12",
+    "k": 50,
+    "t": 0.5,
+    "deviation": 0.10131960362195969
+  },
+  {
+    "dataset": "Set12",
+    "k": 75,
+    "t": 0.75,
+    "deviation": 0.05085629224777222
+  },
+  {
+    "dataset": "Set12",
+    "k": 100,
+    "t": 1.0,
+    "deviation": 0.0
+  }
+]

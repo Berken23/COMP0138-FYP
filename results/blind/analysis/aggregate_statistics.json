@@ -1,0 +1,41 @@
+{
+  "BSD68": {
+    "sigma_error_mean": 0.39287865840771047,
+    "sigma_error_std": 0.36672975167910815,
+    "sigma_error_max": 1.5392049642453896,
+    "psnr_gap_mean": 0.10767553036470703,
+    "psnr_gap_std": 0.12419454251776489,
+    "psnr_gap_max": 0.3799924302664408,
+    "psnr_mean": 23.094202953154998,
+    "frac_gap_below_0p1": 0.6666666666666666,
+    "frac_gap_below_0p5": 1.0,
+    "frac_gap_below_1p0": 1.0,
+    "n_configurations": 18
+  },
+  "CelebA": {
+    "sigma_error_mean": 0.4423137035715628,
+    "sigma_error_std": 0.41966054305255324,
+    "sigma_error_max": 1.7444251989843609,
+    "psnr_gap_mean": 0.22867637789222486,
+    "psnr_gap_std": 0.2522012066945877,
+    "psnr_gap_max": 0.9860938780307045,
+    "psnr_mean": 25.83023716340983,
+    "frac_gap_below_0p1": 0.4444444444444444,
+    "frac_gap_below_0p5": 0.8888888888888888,
+    "frac_gap_below_1p0": 1.0,
+    "n_configurations": 18
+  },
+  "Set12": {
+    "sigma_error_mean": 0.4169550745071037,
+    "sigma_error_std": 0.41010787971901885,
+    "sigma_error_max": 1.6338608962613226,
+    "psnr_gap_mean": 0.1260501064710494,
+    "psnr_gap_std": 0.21812125399812657,
+    "psnr_gap_max": 0.6044000665567886,
+    "psnr_mean": 22.39018772271798,
+    "frac_gap_below_0p1": 0.6111111111111112,
+    "frac_gap_below_0p5": 0.8333333333333334,
+    "frac_gap_below_1p0": 1.0,
+    "n_configurations": 18
+  }
+}

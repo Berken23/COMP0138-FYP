@@ -1,0 +1,18 @@
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{cccccccc}
+\toprule
+$\sigma$ & $\eta$ & blur-SURE err & Krishnan err & blur-SURE gap & Krishnan PnP gap & Krishnan classical PSNR & oracle PSNR \\
+\midrule
+0.5 & 0.10 & 0.3711 & 0.4591 & +0.37 & +0.59 & 23.26 & 25.84 \\
+1.0 & 0.10 & 0.1626 & 0.3915 & +0.08 & +0.11 & 23.85 & 24.51 \\
+1.5 & 0.10 & 0.1450 & 0.5078 & +0.01 & -0.03 & 23.61 & 23.52 \\
+2.0 & 0.10 & 0.3499 & 0.8931 & +0.02 & -0.00 & 22.76 & 22.77 \\
+3.0 & 0.10 & 0.9080 & 1.8872 & +0.09 & +0.16 & 21.10 & 21.67 \\
+4.0 & 0.10 & 1.5392 & 3.1796 & +0.19 & +0.43 & 19.84 & 20.89 \\
+\bottomrule
+\end{tabular}
+\caption{BSD68: blur-SURE versus Krishnan classical baseline. Layout legacy_eta_only.}
+\label{tab:krishnan_compare_bsd68}
+\end{table}
