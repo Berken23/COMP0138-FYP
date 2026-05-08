@@ -480,7 +480,8 @@ def main() -> None:
     args = parse_args()
     output_dir = args.output_dir or os.path.join(
         find_repo_root(), "results", "blind", "krishnan_baseline",
-        args.dataset, f"sigma_{args.sigma:.2f}",
+        args.dataset,
+        f"sigma_{args.sigma:.2f}_noise_{args.noise_std:.2f}",
     )
     os.makedirs(output_dir, exist_ok=True)
     run(
