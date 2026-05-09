@@ -1,0 +1,20 @@
+{
+  "approach": "krishnan_baseline",
+  "dataset": "Set12",
+  "sigma_true": 4.0,
+  "noise_std": 0.01,
+  "num_images": 12,
+  "outer_iters": 5,
+  "inner_iters": 30,
+  "sigma_error_mean": 1.752244810263316,
+  "sigma_error_std": 0.20378812799161328,
+  "psnr_classical_mean": 20.35386003794566,
+  "ssim_classical_mean": 0.5323846191167831,
+  "lpips_classical_mean": 0.6776619056860606,
+  "psnr_pnp_mean": 19.258265080538873,
+  "ssim_pnp_mean": 0.4443426231543223,
+  "lpips_pnp_mean": 0.7042885273694992,
+  "psnr_oracle_mean": 19.290323945644076,
+  "psnr_gap_classical_mean": -1.063536092301583,
+  "psnr_gap_pnp_mean": 0.03205886510520095
+}
