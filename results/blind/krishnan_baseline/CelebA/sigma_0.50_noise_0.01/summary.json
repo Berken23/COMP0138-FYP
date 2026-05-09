@@ -1,0 +1,20 @@
+{
+  "approach": "krishnan_baseline",
+  "dataset": "CelebA",
+  "sigma_true": 0.5,
+  "noise_std": 0.01,
+  "num_images": 250,
+  "outer_iters": 5,
+  "inner_iters": 30,
+  "sigma_error_mean": 0.8032521462440491,
+  "sigma_error_std": 0.16061072853557057,
+  "psnr_classical_mean": 26.291023190846794,
+  "ssim_classical_mean": 0.8585843691825866,
+  "lpips_classical_mean": 0.164672305457294,
+  "psnr_pnp_mean": 28.09752914695014,
+  "ssim_pnp_mean": 0.8363411965370178,
+  "lpips_pnp_mean": 0.13668342952430249,
+  "psnr_oracle_mean": 29.34689103905757,
+  "psnr_gap_classical_mean": 3.0558678482107724,
+  "psnr_gap_pnp_mean": 1.2493618921074303
+}
