@@ -69,11 +69,17 @@ def _load_model(repo_root: str, device: str, img_size: int = 128, num_channels: 
 def _aggregate(records: List[Dict]) -> Dict[str, float]:
     keys = ["sigma_estimated", "sigma_error", "psnr_blind", "ssim_blind", "lpips_blind",
             "psnr_oracle", "ssim_oracle", "lpips_oracle", "psnr_gap"]
-    return {
-        k: float(sum(r[k] for r in records) / len(records))
-        for k in keys
-        if records and k in records[0]
-    }
+    if not records:
+        return {}
+    import numpy as np
+    summary: Dict[str, float] = {}
+    for k in keys:
+        if k not in records[0]:
+            continue
+        vals = [r[k] for r in records]
+        summary[k] = float(np.mean(vals))
+        summary[f"{k}_std"] = float(np.std(vals))
+    return summary
 
 
 def run(
@@ -86,6 +92,7 @@ def run(
     pnp_lr: float,
     noise_std: float,
     sigma_seed: int,
+    gamma_style: str = "1_minus_t",
 ) -> Dict:
     repo_root = _find_repo_root()
     print(f"Repo root: {repo_root}")
@@ -98,7 +105,10 @@ def run(
         images = images[:num_images]
     print(f"Using {len(images)} images")
 
-    out_dir = os.path.join(output_dir, dataset, f"sigma_{sigma_true:.2f}")
+    # Tag the output directory with the schedule when it differs from the
+    # default, so runs with different schedules do not overwrite each other.
+    schedule_suffix = "" if gamma_style == "1_minus_t" else f"_{gamma_style}"
+    out_dir = os.path.join(output_dir, dataset, f"sigma_{sigma_true:.2f}{schedule_suffix}")
     os.makedirs(out_dir, exist_ok=True)
     images_dir = os.path.join(out_dir, "images")
     os.makedirs(images_dir, exist_ok=True)
@@ -116,9 +126,11 @@ def run(
 
         x_blind = pnp_flow_reconstruct(
             model, y=y, sigma_blur=sigma_hat, num_steps=pnp_steps, lr=pnp_lr,
+            gamma_style=gamma_style,
         )
         x_oracle = non_blind_oracle(
             model, y=y, sigma_true=sigma_true, num_steps=pnp_steps, lr=pnp_lr,
+            gamma_style=gamma_style,
         )
 
         m_blind = evaluate(x_blind, x_clean)
@@ -156,6 +168,7 @@ def run(
     summary["num_images"] = len(records)
     summary["pnp_steps"] = pnp_steps
     summary["pnp_lr"] = pnp_lr
+    summary["gamma_style"] = gamma_style
     summary["noise_std"] = noise_std
     summary["elapsed_seconds"] = time.time() - t_start
 
@@ -183,6 +196,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--noise-std", type=float, default=0.05, help="Additive noise std")
     p.add_argument("--pnp-steps", type=int, default=100, help="PnP-Flow trajectory steps")
     p.add_argument("--pnp-lr", type=float, default=1.0, help="PnP-Flow data fit step size")
+    p.add_argument(
+        "--gamma-style",
+        choices=["1_minus_t", "sqrt_1_minus_t", "constant", "alpha_1_minus_t"],
+        default="1_minus_t",
+        help="Step-size schedule for the data-fidelity gradient step in PnP-Flow.",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -208,6 +227,7 @@ def main() -> None:
         device=args.device,
         pnp_steps=args.pnp_steps,
         pnp_lr=args.pnp_lr,
+        gamma_style=args.gamma_style,
         noise_std=args.noise_std,
         sigma_seed=args.seed,
     )

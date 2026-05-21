@@ -126,19 +126,33 @@ def run(
                         "oracle_lpips": m_orc["lpips"],
                     })
 
-                psnr_mean = float(np.mean([p["psnr_mean"] for p in per_image]))
-                oracle_psnr = float(np.mean([p["oracle_psnr"] for p in per_image]))
+                psnr_vals = [p["psnr_mean"] for p in per_image]
+                ssim_vals = [p["ssim_mean"] for p in per_image]
+                lpips_vals = [p["lpips_mean"] for p in per_image]
+                oracle_psnr_vals = [p["oracle_psnr"] for p in per_image]
+                oracle_ssim_vals = [p["oracle_ssim"] for p in per_image]
+                oracle_lpips_vals = [p["oracle_lpips"] for p in per_image]
+                gap_vals = [p["oracle_psnr"] - p["psnr_mean"] for p in per_image]
+                psnr_mean = float(np.mean(psnr_vals))
+                oracle_psnr = float(np.mean(oracle_psnr_vals))
                 all_results[cfg_key] = {
                     "per_image": per_image,
                     "sigma_error_mean": float(np.mean([p["sigma_error"] for p in per_image])),
                     "sigma_error_std": float(np.std([p["sigma_error"] for p in per_image])),
                     "psnr_mean": psnr_mean,
-                    "ssim_mean": float(np.mean([p["ssim_mean"] for p in per_image])),
-                    "lpips_mean": float(np.mean([p["lpips_mean"] for p in per_image])),
+                    "psnr_std": float(np.std(psnr_vals)),
+                    "ssim_mean": float(np.mean(ssim_vals)),
+                    "ssim_std": float(np.std(ssim_vals)),
+                    "lpips_mean": float(np.mean(lpips_vals)),
+                    "lpips_std": float(np.std(lpips_vals)),
                     "oracle_psnr_mean": oracle_psnr,
-                    "oracle_ssim_mean": float(np.mean([p["oracle_ssim"] for p in per_image])),
-                    "oracle_lpips_mean": float(np.mean([p["oracle_lpips"] for p in per_image])),
+                    "oracle_psnr_std": float(np.std(oracle_psnr_vals)),
+                    "oracle_ssim_mean": float(np.mean(oracle_ssim_vals)),
+                    "oracle_ssim_std": float(np.std(oracle_ssim_vals)),
+                    "oracle_lpips_mean": float(np.mean(oracle_lpips_vals)),
+                    "oracle_lpips_std": float(np.std(oracle_lpips_vals)),
                     "psnr_gap": oracle_psnr - psnr_mean,
+                    "psnr_gap_std": float(np.std(gap_vals)),
                 }
                 r = all_results[cfg_key]
                 print(

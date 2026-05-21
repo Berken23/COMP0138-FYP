@@ -814,6 +814,13 @@ def plot_failed_approaches(results_dir: str, fig_dir: str) -> None:
 
 
 def plot_non_blind_ablation(results_dir: str, fig_dir: str) -> None:
+    """Render the non-blind ablation as a 2x3 grid.
+
+    Numerical axes (num_steps, lr, num_samples, outer_iters) render as line
+    plots with error bars; categorical axes (gamma, warm_start) render as
+    bar charts with error bars. Line plots make the trend across a numeric
+    sweep visible at a glance, which bar charts obscure.
+    """
     data = _load(os.path.join(results_dir, "ablation_results.json"))
     datasets_present = set()
     for group in data.values():
@@ -823,22 +830,42 @@ def plot_non_blind_ablation(results_dir: str, fig_dir: str) -> None:
 
     panels = [k for k in ["gamma", "num_steps", "lr", "num_samples", "outer_iters", "warm_start"]
               if k in data]
+    NUMERIC_PANELS = {"num_steps", "lr", "num_samples", "outer_iters"}
+
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes = axes.flatten()
     for ax_idx, panel in enumerate(panels):
         ax = axes[ax_idx]
         labels = list(data[panel].keys())
-        x = np.arange(len(labels))
-        width = 0.8 / max(1, len(datasets))
-        for di, dname in enumerate(datasets):
-            psnrs = [data[panel][label].get(dname, {}).get("psnr_mean", 0.0) for label in labels]
-            ax.bar(x + di * width, psnrs, width, label=dname, alpha=0.8)
-        ax.set_xticks(x + width * (len(datasets) - 1) / 2)
-        ax.set_xticklabels([str(label) for label in labels], fontsize=8, rotation=20, ha="right")
+
+        if panel in NUMERIC_PANELS:
+            try:
+                pairs = sorted(((float(l), l) for l in labels), key=lambda t: t[0])
+            except ValueError:
+                pairs = [(i, l) for i, l in enumerate(labels)]
+            xs = [p[0] for p in pairs]
+            ordered = [p[1] for p in pairs]
+            for dname in datasets:
+                psnrs = [data[panel][label].get(dname, {}).get("psnr_mean", 0.0) for label in ordered]
+                stds = [data[panel][label].get(dname, {}).get("psnr_std", 0.0) for label in ordered]
+                ax.errorbar(xs, psnrs, yerr=stds, marker="o", linewidth=1.5,
+                            capsize=3, label=dname)
+            ax.set_xlabel(panel)
+        else:
+            x = np.arange(len(labels))
+            width = 0.8 / max(1, len(datasets))
+            for di, dname in enumerate(datasets):
+                psnrs = [data[panel][label].get(dname, {}).get("psnr_mean", 0.0) for label in labels]
+                stds = [data[panel][label].get(dname, {}).get("psnr_std", 0.0) for label in labels]
+                ax.bar(x + di * width, psnrs, width, yerr=stds, label=dname,
+                       alpha=0.8, capsize=3)
+            ax.set_xticks(x + width * (len(datasets) - 1) / 2)
+            ax.set_xticklabels([str(label) for label in labels], fontsize=8, rotation=20, ha="right")
+
         ax.set_ylabel("PSNR (dB)")
         ax.set_title(panel)
         ax.legend(fontsize=7)
-        ax.grid(alpha=0.3, axis="y")
+        ax.grid(alpha=0.3)
     for k in range(len(panels), len(axes)):
         axes[k].axis("off")
     plt.suptitle("Non blind ablation (true sigma)", fontsize=14)

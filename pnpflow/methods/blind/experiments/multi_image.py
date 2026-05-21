@@ -106,7 +106,7 @@ def run(
         sigma_est = res["sigma_star"]
         err = abs(sigma_est - RECON_SIGMA)
 
-        qual_save_for_B = B in (1, max(b_values))
+        qual_save_for_B = B in {1, 4, 16, max(b_values)}
         qual_dir = os.path.join(output_dir, "qualitative", f"B={B}")
         if qual_save_for_B:
             os.makedirs(qual_dir, exist_ok=True)
@@ -148,16 +148,24 @@ def run(
                 save_image(postprocess(first_x_rec), os.path.join(qual_dir, f"{i:04d}_blind.png"))
                 save_image(postprocess(x_orc), os.path.join(qual_dir, f"{i:04d}_oracle.png"))
 
+        gap_all = [o - b for o, b in zip(orc_psnr_all, psnr_all)]
         recon_results[B] = {
             "sigma_est": sigma_est,
             "sigma_error": err,
             "psnr_mean": float(np.mean(psnr_all)),
+            "psnr_std": float(np.std(psnr_all)),
             "ssim_mean": float(np.mean(ssim_all)),
+            "ssim_std": float(np.std(ssim_all)),
             "lpips_mean": float(np.mean(lpips_all)),
+            "lpips_std": float(np.std(lpips_all)),
             "orc_psnr_mean": float(np.mean(orc_psnr_all)),
+            "orc_psnr_std": float(np.std(orc_psnr_all)),
             "orc_ssim_mean": float(np.mean(orc_ssim_all)),
+            "orc_ssim_std": float(np.std(orc_ssim_all)),
             "orc_lpips_mean": float(np.mean(orc_lpips_all)),
+            "orc_lpips_std": float(np.std(orc_lpips_all)),
             "psnr_gap": float(np.mean(orc_psnr_all) - np.mean(psnr_all)),
+            "psnr_gap_std": float(np.std(gap_all)),
         }
         r = recon_results[B]
         print(

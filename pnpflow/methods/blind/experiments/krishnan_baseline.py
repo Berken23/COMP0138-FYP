@@ -63,6 +63,7 @@ from ..data import load_dataset
 from ..evaluation import evaluate, postprocess
 from ..forward import gaussian_blur_fft
 from ..reconstruction import pnp_flow_reconstruct
+from ..sigma_estimation import estimate_sigma_blur_sure
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +348,22 @@ def run(
                 )
             m_pnp = evaluate(x_pnp, x_gt)
 
+        # SURE-based blind reconstruction for direct comparison against
+        # Krishnan in the same per-image table and qualitative figure.
+        m_blind = None
+        x_blind = None
+        sigma_sure = None
+        if model is not None:
+            with tt.track("sure_estimation"):
+                sure_out = estimate_sigma_blur_sure(y, noise_var=noise_std ** 2)
+            sigma_sure = sure_out["sigma_star"]
+            torch.manual_seed(SEED + idx * 100)
+            with tt.track("blind_recon_sure"):
+                x_blind = pnp_flow_reconstruct(
+                    model, y=y, sigma_blur=sigma_sure, num_steps=pnp_steps,
+                )
+            m_blind = evaluate(x_blind, x_gt)
+
         # Oracle for headline gap reporting
         if model is not None:
             torch.manual_seed(SEED + idx * 100)
@@ -372,6 +389,10 @@ def run(
             save_image(postprocess(x_classical), os.path.join(qual_dir, f"{idx:04d}_krishnan.png"))
             if x_pnp is not None:
                 save_image(postprocess(x_pnp), os.path.join(qual_dir, f"{idx:04d}_pnp_with_krishnan_sigma.png"))
+            if x_blind is not None:
+                save_image(postprocess(x_blind), os.path.join(qual_dir, f"{idx:04d}_blind.png"))
+            if model is not None:
+                save_image(postprocess(x_oracle), os.path.join(qual_dir, f"{idx:04d}_oracle.png"))
 
         record = {
             "index": idx,
@@ -388,6 +409,14 @@ def run(
                 "ssim_pnp_with_krishnan_sigma": m_pnp["ssim"],
                 "lpips_pnp_with_krishnan_sigma": m_pnp["lpips"],
             })
+        if m_blind is not None:
+            record.update({
+                "sigma_sure": sigma_sure,
+                "sigma_error_sure": abs(sigma_sure - sigma_true),
+                "psnr_blind": m_blind["psnr"],
+                "ssim_blind": m_blind["ssim"],
+                "lpips_blind": m_blind["lpips"],
+            })
         if m_oracle is not None:
             record.update({
                 "psnr_oracle": m_oracle["psnr"],
@@ -397,6 +426,8 @@ def run(
             })
             if m_pnp is not None:
                 record["psnr_gap_pnp_with_krishnan_sigma"] = m_oracle["psnr"] - m_pnp["psnr"]
+            if m_blind is not None:
+                record["psnr_gap_blind"] = m_oracle["psnr"] - m_blind["psnr"]
         records.append(record)
 
         msg = (
@@ -406,10 +437,15 @@ def run(
         )
         if m_pnp is not None:
             msg += f" PSNR_pnp(krishnan_sigma)={m_pnp['psnr']:.2f}"
+        if m_blind is not None:
+            msg += f" sigma_sure={sigma_sure:.3f} PSNR_blind={m_blind['psnr']:.2f}"
         if m_oracle is not None:
             msg += f" PSNR_oracle={m_oracle['psnr']:.2f}"
         print(msg)
 
+    psnr_classical_vals = [r["psnr_classical"] for r in records]
+    ssim_classical_vals = [r["ssim_classical"] for r in records]
+    lpips_classical_vals = [r["lpips_classical"] for r in records]
     summary = {
         "approach": "krishnan_baseline",
         "dataset": dataset,
@@ -420,40 +456,78 @@ def run(
         "inner_iters": inner_iters,
         "sigma_error_mean": float(np.mean([r["sigma_error"] for r in records])),
         "sigma_error_std": float(np.std([r["sigma_error"] for r in records])),
-        "psnr_classical_mean": float(np.mean([r["psnr_classical"] for r in records])),
-        "ssim_classical_mean": float(np.mean([r["ssim_classical"] for r in records])),
-        "lpips_classical_mean": float(np.mean([r["lpips_classical"] for r in records])),
+        "psnr_classical_mean": float(np.mean(psnr_classical_vals)),
+        "psnr_classical_std": float(np.std(psnr_classical_vals)),
+        "ssim_classical_mean": float(np.mean(ssim_classical_vals)),
+        "ssim_classical_std": float(np.std(ssim_classical_vals)),
+        "lpips_classical_mean": float(np.mean(lpips_classical_vals)),
+        "lpips_classical_std": float(np.std(lpips_classical_vals)),
     }
     if records and "psnr_pnp_with_krishnan_sigma" in records[0]:
+        psnr_pnp_vals = [r["psnr_pnp_with_krishnan_sigma"] for r in records]
+        ssim_pnp_vals = [r["ssim_pnp_with_krishnan_sigma"] for r in records]
+        lpips_pnp_vals = [r["lpips_pnp_with_krishnan_sigma"] for r in records]
         summary.update({
-            "psnr_pnp_mean": float(np.mean([r["psnr_pnp_with_krishnan_sigma"] for r in records])),
-            "ssim_pnp_mean": float(np.mean([r["ssim_pnp_with_krishnan_sigma"] for r in records])),
-            "lpips_pnp_mean": float(np.mean([r["lpips_pnp_with_krishnan_sigma"] for r in records])),
+            "psnr_pnp_mean": float(np.mean(psnr_pnp_vals)),
+            "psnr_pnp_std": float(np.std(psnr_pnp_vals)),
+            "ssim_pnp_mean": float(np.mean(ssim_pnp_vals)),
+            "ssim_pnp_std": float(np.std(ssim_pnp_vals)),
+            "lpips_pnp_mean": float(np.mean(lpips_pnp_vals)),
+            "lpips_pnp_std": float(np.std(lpips_pnp_vals)),
+        })
+    if records and "psnr_blind" in records[0]:
+        sigma_error_sure_vals = [r["sigma_error_sure"] for r in records]
+        psnr_blind_vals = [r["psnr_blind"] for r in records]
+        ssim_blind_vals = [r["ssim_blind"] for r in records]
+        lpips_blind_vals = [r["lpips_blind"] for r in records]
+        summary.update({
+            "sigma_error_sure_mean": float(np.mean(sigma_error_sure_vals)),
+            "sigma_error_sure_std": float(np.std(sigma_error_sure_vals)),
+            "psnr_blind_mean": float(np.mean(psnr_blind_vals)),
+            "psnr_blind_std": float(np.std(psnr_blind_vals)),
+            "ssim_blind_mean": float(np.mean(ssim_blind_vals)),
+            "ssim_blind_std": float(np.std(ssim_blind_vals)),
+            "lpips_blind_mean": float(np.mean(lpips_blind_vals)),
+            "lpips_blind_std": float(np.std(lpips_blind_vals)),
         })
     if records and "psnr_oracle" in records[0]:
+        oracle_psnr_vals = [r["psnr_oracle"] for r in records]
+        gap_classical_vals = [r["psnr_gap_classical"] for r in records]
         summary.update({
-            "psnr_oracle_mean": float(np.mean([r["psnr_oracle"] for r in records])),
-            "psnr_gap_classical_mean": float(np.mean([r["psnr_gap_classical"] for r in records])),
+            "psnr_oracle_mean": float(np.mean(oracle_psnr_vals)),
+            "psnr_oracle_std": float(np.std(oracle_psnr_vals)),
+            "psnr_gap_classical_mean": float(np.mean(gap_classical_vals)),
+            "psnr_gap_classical_std": float(np.std(gap_classical_vals)),
         })
         if "psnr_gap_pnp_with_krishnan_sigma" in records[0]:
-            summary["psnr_gap_pnp_mean"] = float(
-                np.mean([r["psnr_gap_pnp_with_krishnan_sigma"] for r in records])
-            )
+            gap_pnp_vals = [r["psnr_gap_pnp_with_krishnan_sigma"] for r in records]
+            summary["psnr_gap_pnp_mean"] = float(np.mean(gap_pnp_vals))
+            summary["psnr_gap_pnp_std"] = float(np.std(gap_pnp_vals))
+        if "psnr_gap_blind" in records[0]:
+            gap_blind_vals = [r["psnr_gap_blind"] for r in records]
+            summary["psnr_gap_blind_mean"] = float(np.mean(gap_blind_vals))
+            summary["psnr_gap_blind_std"] = float(np.std(gap_blind_vals))
 
     save_json(os.path.join(output_dir, "per_image.json"), records)
     save_json(os.path.join(output_dir, "summary.json"), summary)
 
     print()
     print(f"Wrote results to {output_dir}")
-    print(f"sigma error mean: {summary['sigma_error_mean']:.4f}")
-    print(f"PSNR classical:   {summary['psnr_classical_mean']:.2f}")
+    print(f"sigma error mean (Krishnan): {summary['sigma_error_mean']:.4f}")
+    if "sigma_error_sure_mean" in summary:
+        print(f"sigma error mean (SURE):     {summary['sigma_error_sure_mean']:.4f}")
+    print(f"PSNR classical:              {summary['psnr_classical_mean']:.2f}")
     if "psnr_pnp_mean" in summary:
-        print(f"PSNR PnP (krishnan_sigma): {summary['psnr_pnp_mean']:.2f}")
+        print(f"PSNR PnP (krishnan_sigma):   {summary['psnr_pnp_mean']:.2f}")
+    if "psnr_blind_mean" in summary:
+        print(f"PSNR blind (SURE):           {summary['psnr_blind_mean']:.2f}")
     if "psnr_oracle_mean" in summary:
-        print(f"PSNR oracle:      {summary['psnr_oracle_mean']:.2f}")
-        print(f"PSNR gap classical:        {summary['psnr_gap_classical_mean']:+.2f}")
+        print(f"PSNR oracle:                 {summary['psnr_oracle_mean']:.2f}")
+        print(f"PSNR gap classical:          {summary['psnr_gap_classical_mean']:+.2f}")
         if "psnr_gap_pnp_mean" in summary:
-            print(f"PSNR gap PnP(krishnan):    {summary['psnr_gap_pnp_mean']:+.2f}")
+            print(f"PSNR gap PnP(krishnan):      {summary['psnr_gap_pnp_mean']:+.2f}")
+        if "psnr_gap_blind_mean" in summary:
+            print(f"PSNR gap blind (SURE):       {summary['psnr_gap_blind_mean']:+.2f}")
     print(tt.summary())
     return summary
 
