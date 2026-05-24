@@ -1,0 +1,9 @@
+Configuration: CelebA image 2, sigma = 1.5, nu = 0.05
+Degraded y:  PSNR = 26.40 dB
+t = 0.0 (t_00.png):  PSNR = 26.40 dB
+t = 0.2 (t_02.png):  PSNR = 20.29 dB
+t = 0.4 (t_04.png):  PSNR = 22.71 dB
+t = 0.6 (t_06.png):  PSNR = 25.01 dB
+t = 0.8 (t_08.png):  PSNR = 26.30 dB
+t = 1.0 (t_10.png):  PSNR = 27.30 dB
+Final x (t=1.0):  PSNR = 27.30 dB
