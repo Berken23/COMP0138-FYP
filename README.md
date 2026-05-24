@@ -215,7 +215,7 @@ upstream PnP-Flow paper:
 The PnP-Flow framework, the OT flow-matching architecture and
 checkpoints, the upstream training pipeline, and the CelebA dataset
 loader are taken unchanged from
-[github.com/annegnx/PnP-Flow](https://github.com/annegnx/PnP-Flow). We
-gratefully acknowledge the upstream authors, whose work this thesis
+[github.com/annegnx/PnP-Flow](https://github.com/annegnx/PnP-Flow). I gratefully
+acknowledge the upstream authors, whose work this thesis
 builds upon. License terms of the upstream code (BSD 3-Clause) apply to
 all unmodified upstream files.
