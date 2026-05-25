@@ -1,0 +1,29 @@
+Non-blind oracle trajectory visualisation
+Configuration: sigma = 1.5, nu = 0.05, num_steps = 100, lr = 1.0, gamma = 1 - t, cold start
+
+CelebA (index 2, obs seed 44, recon seed 242):
+  degraded:      PSNR = 26.40 dB
+  t = 0.0:       PSNR = 26.40 dB
+  t = 0.2:       PSNR = 20.29 dB
+  t = 0.4:       PSNR = 22.71 dB
+  t = 0.6:       PSNR = 25.01 dB
+  t = 0.8:       PSNR = 26.30 dB
+  t = 1.0:       PSNR = 27.30 dB
+
+BSD68 (index 0, obs seed 42, recon seed 42):
+  degraded:      PSNR = 28.44 dB
+  t = 0.0:       PSNR = 28.44 dB
+  t = 0.2:       PSNR = 20.18 dB
+  t = 0.4:       PSNR = 24.75 dB
+  t = 0.6:       PSNR = 26.07 dB
+  t = 0.8:       PSNR = 27.48 dB
+  t = 1.0:       PSNR = 28.51 dB
+
+Set12 (index 2, obs seed 44, recon seed 242):
+  degraded:      PSNR = 23.75 dB
+  t = 0.0:       PSNR = 23.75 dB
+  t = 0.2:       PSNR = 16.23 dB
+  t = 0.4:       PSNR = 18.37 dB
+  t = 0.6:       PSNR = 20.26 dB
+  t = 0.8:       PSNR = 21.44 dB
+  t = 1.0:       PSNR = 22.34 dB
