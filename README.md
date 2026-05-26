@@ -29,7 +29,14 @@ bash download.sh pretrained-network-celeba
 ```
 
 BSD68 and Set12 must be staged manually as PNG files at `data/BSD68/`
-and `data/Set12/`, respectively.
+and `data/Set12/`. The canonical sources are the DnCNN benchmark
+distributions:
+
+- BSD68: [github.com/cszn/DnCNN/tree/master/testsets/BSD68](https://github.com/cszn/DnCNN/tree/master/testsets/BSD68)
+- Set12: [github.com/cszn/DnCNN/tree/master/testsets/Set12](https://github.com/cszn/DnCNN/tree/master/testsets/Set12)
+
+Download the PNG files from the linked directories and place them
+directly into `data/BSD68/` (68 PNGs) and `data/Set12/` (12 PNGs).
 
 ## Layout
 
